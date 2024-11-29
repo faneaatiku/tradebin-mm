@@ -1,11 +1,13 @@
 package client
 
 import (
+	authv1beta1 "cosmossdk.io/api/cosmos/auth/v1beta1"
 	bankv1beta1 "cosmossdk.io/api/cosmos/bank/v1beta1"
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
 	tradebinTypes "github.com/bze-alphateam/bze/x/tradebin/types"
+	sdkTx "github.com/cosmos/cosmos-sdk/types/tx"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/connectivity"
 	"google.golang.org/grpc/credentials"
@@ -109,8 +111,30 @@ func (c *GrpcClient) GetBankQueryClient() (bankv1beta1.QueryClient, error) {
 	return queryClient, nil
 }
 
+func (c *GrpcClient) GetAuthQueryClient() (authv1beta1.QueryClient, error) {
+	grpcConn, err := c.getConnection()
+	if err != nil {
+		return nil, err
+	}
+
+	queryClient := authv1beta1.NewQueryClient(grpcConn)
+
+	return queryClient, nil
+}
+
 func (c *GrpcClient) CloseConnection() {
 	if c.conn != nil {
 		_ = c.conn.Close()
 	}
+}
+
+func (c *GrpcClient) GetServiceClient() (sdkTx.ServiceClient, error) {
+	conn, err := c.getConnection()
+	if err != nil {
+		return nil, err
+	}
+
+	sc := sdkTx.NewServiceClient(conn)
+
+	return sc, nil
 }

@@ -86,12 +86,13 @@ type Logging struct {
 }
 
 type Config struct {
-	Orders  Orders  `yaml:"orders"`
-	Market  Market  `yaml:"market"`
-	Volume  Volume  `yaml:"volume"`
-	Wallet  Wallet  `yaml:"wallet"`
-	Client  Client  `yaml:"client"`
-	Logging Logging `yaml:"logging"`
+	Orders      Orders      `yaml:"orders"`
+	Market      Market      `yaml:"market"`
+	Volume      Volume      `yaml:"volume"`
+	Wallet      Wallet      `yaml:"wallet"`
+	Client      Client      `yaml:"client"`
+	Logging     Logging     `yaml:"logging"`
+	Transaction Transaction `yaml:"transaction"`
 }
 
 func (c *Config) Validate() error {
@@ -112,6 +113,10 @@ func (c *Config) Validate() error {
 	}
 
 	if err := c.Client.Validate(); err != nil {
+		return err
+	}
+
+	if err := c.Transaction.Validate(); err != nil {
 		return err
 	}
 

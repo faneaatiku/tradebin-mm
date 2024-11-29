@@ -26,7 +26,7 @@ type ordersProvider interface {
 }
 
 type orderSubmitter interface {
-	CancelOrder(tradebinTypes.Order) error
+	CancelOrders([]*tradebinTypes.MsgCancelOrder) error
 	AddOrders([]*tradebinTypes.MsgCreateOrder) error
 }
 
@@ -76,9 +76,9 @@ func NewOrdersFiller(
 }
 
 func (o *Orders) FillOrderBook() error {
-	balances, err := o.balanceProvider.GetAddressBalancesForMarket(o.addressProvider.GetAddress().String(), o.marketConfig)
+	balances, err := o.getBalances()
 	if err != nil {
-		return fmt.Errorf("failed to get address balances for market: %v", err)
+		return fmt.Errorf("failed to get balances: %v", err)
 	}
 
 	requiredOrders := o.ordersConfig.GetBuyNo() + o.ordersConfig.GetSellNo()
@@ -122,6 +122,27 @@ func (o *Orders) FillOrderBook() error {
 	return nil
 }
 
+func (o *Orders) getBalances() (*dto.MarketBalance, error) {
+	balances, err := o.balanceProvider.GetAddressBalancesForMarket(o.addressProvider.GetAddress().String(), o.marketConfig)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get address balances for market: %v", err)
+	}
+
+	if balances == nil {
+		return nil, fmt.Errorf("failed to get address balances for market")
+	}
+
+	if balances.QuoteBalance == nil || !balances.QuoteBalance.IsPositive() {
+		return nil, fmt.Errorf("no balance found for %s", o.marketConfig.GetQuoteDenom())
+	}
+
+	if balances.BaseBalance == nil || !balances.BaseBalance.IsPositive() {
+		return nil, fmt.Errorf("no balance found for %s", o.marketConfig.GetQuoteDenom())
+	}
+
+	return balances, nil
+}
+
 func (o *Orders) fillOrders(existingOrders []tradebinTypes.AggregatedOrder, startPrice *types.Dec, orderType string, neededOrders int) error {
 	l := o.l.WithField("orderType", orderType)
 
@@ -151,7 +172,7 @@ func (o *Orders) fillOrders(existingOrders []tradebinTypes.AggregatedOrder, star
 			o.addressProvider.GetAddress().String(),
 			orderType,
 			randAmount.String(),
-			newStartPrice.String(),
+			internal.TrimAmountTrailingZeros(newStartPrice.String()),
 			existing.MarketId,
 		)
 
@@ -176,7 +197,7 @@ func (o *Orders) fillOrders(existingOrders []tradebinTypes.AggregatedOrder, star
 				o.addressProvider.GetAddress().String(),
 				existingOrders[0].MarketId,
 				orderType,
-				newStartPrice.String(),
+				internal.TrimAmountTrailingZeros(newStartPrice.String()),
 				randAmount.String(),
 			)
 			newOrdersMsgs = append(newOrdersMsgs, msg)
@@ -191,7 +212,7 @@ func (o *Orders) fillOrders(existingOrders []tradebinTypes.AggregatedOrder, star
 
 	l.Info("submitting new orders")
 
-	return o.orderSubmitter.AddOrders(newOrdersMsgs)
+	return o.orderSubmitter.AddOrders(newOrdersMsgs[:1])
 }
 
 func (o *Orders) getStartPrice(biggestBuy *types.Dec, smallestSell *types.Dec) *types.Dec {
@@ -247,11 +268,15 @@ func (o *Orders) cancelExtraOrders(buys []tradebinTypes.Order, sells []tradebinT
 }
 
 func (o *Orders) cancelOrders(sortedOrders []tradebinTypes.Order, limit int) error {
+	var msgs []*tradebinTypes.MsgCancelOrder
 	for _, order := range sortedOrders[:limit] {
-		err := o.orderSubmitter.CancelOrder(order)
-		if err != nil {
-			return fmt.Errorf("failed to cancel order: %v", err)
-		}
+		m := tradebinTypes.NewMsgCancelOrder(o.addressProvider.GetAddress().String(), order.MarketId, order.Id, order.OrderType)
+		msgs = append(msgs, m)
+	}
+
+	err := o.orderSubmitter.CancelOrders(msgs)
+	if err != nil {
+		return fmt.Errorf("failed to cancel order: %v", err)
 	}
 
 	return nil

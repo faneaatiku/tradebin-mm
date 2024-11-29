@@ -53,3 +53,7 @@ func NewWallet(mnemonic string) (*Wallet, error) {
 func (w *Wallet) GetAddress() types.AccAddress {
 	return w.Address
 }
+
+func (w *Wallet) GetPrivateKey() *secp256k1.PrivKey {
+	return w.Key
+}

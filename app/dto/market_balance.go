@@ -1,9 +1,11 @@
 package dto
 
-import basev1beta1 "cosmossdk.io/api/cosmos/base/v1beta1"
+import (
+	"github.com/cosmos/cosmos-sdk/types"
+)
 
 type MarketBalance struct {
 	MarketId     string
-	BaseBalance  *basev1beta1.Coin
-	QuoteBalance *basev1beta1.Coin
+	BaseBalance  *types.Coin
+	QuoteBalance *types.Coin
 }

@@ -4,6 +4,8 @@ import (
 	"context"
 	bankv1beta1 "cosmossdk.io/api/cosmos/bank/v1beta1"
 	basev1beta1 "cosmossdk.io/api/cosmos/base/v1beta1"
+	"fmt"
+	"github.com/cosmos/cosmos-sdk/types"
 	"github.com/sirupsen/logrus"
 	"tradebin-mm/app/dto"
 	"tradebin-mm/app/internal"
@@ -41,22 +43,32 @@ func (b *Balance) GetAddressBalancesForMarket(address string, marketCfg MarketPr
 		return nil, err
 	}
 
-	var base *basev1beta1.Coin
-	var quote *basev1beta1.Coin
+	m := &dto.MarketBalance{
+		MarketId: marketCfg.GetMarketId(),
+	}
+
+	var base types.Coin
+	var quote types.Coin
 	for _, coin := range qc {
 		if coin.Denom == marketCfg.GetBaseDenom() {
-			base = coin
+			baseInt, ok := types.NewIntFromString(coin.Amount)
+			if !ok {
+				return nil, fmt.Errorf("failed to parse base amount: %s for denom: %s", coin.Amount, coin.Denom)
+			}
+			base = types.NewCoin(coin.Denom, baseInt)
+			m.BaseBalance = &base
 		}
 		if coin.Denom == marketCfg.GetQuoteDenom() {
-			quote = coin
+			quoteInt, ok := types.NewIntFromString(coin.Amount)
+			if !ok {
+				return nil, fmt.Errorf("failed to parse quote amount: %s for denom: %s", coin.Amount, coin.Denom)
+			}
+			quote = types.NewCoin(coin.Denom, quoteInt)
+			m.QuoteBalance = &quote
 		}
 	}
 
-	return &dto.MarketBalance{
-		MarketId:     marketCfg.GetMarketId(),
-		BaseBalance:  base,
-		QuoteBalance: quote,
-	}, nil
+	return m, nil
 }
 
 func (b *Balance) GetAddressBalances(address string) ([]*basev1beta1.Coin, error) {

@@ -22,7 +22,7 @@ type InMemoryCache struct {
 
 func GetMemoryCache() *InMemoryCache {
 	once.Do(func() {
-		cacheService = &InMemoryCache{}
+		cacheService = NewInMemoryCache()
 	})
 
 	return cacheService
