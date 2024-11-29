@@ -27,7 +27,6 @@ type wallet interface {
 }
 
 type txConfig interface {
-	GetGas() uint64
 	GetGasPrices() string
 	GetGasAdjustment() float64
 	GetChainId() string

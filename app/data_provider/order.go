@@ -188,7 +188,7 @@ func (o *Order) getAggregatedOrdersQueryParams(marketId, orderType string) *type
 		Market:    marketId,
 		OrderType: orderType,
 		Pagination: &query.PageRequest{
-			Limit:   10000,
+			Limit:   1000,
 			Reverse: reverse,
 		},
 	}

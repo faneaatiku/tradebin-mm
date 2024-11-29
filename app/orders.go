@@ -156,63 +156,52 @@ func (o *Orders) fillOrders(existingOrders []tradebinTypes.AggregatedOrder, star
 	newStartPrice := *startPrice
 
 	var newOrdersMsgs []*tradebinTypes.MsgCreateOrder
-	for _, existing := range existingOrders {
-		if existing.OrderType != orderType {
-			return fmt.Errorf("expected order type to be %s but encountered order of different type: %s", orderType, existing.OrderType)
+	l.Info("not enough existing orders to fill the needed number of orders")
+	for neededOrders > 0 {
+		shouldPlace := true
+		for _, existing := range existingOrders {
+			if existing.OrderType != orderType {
+				return fmt.Errorf("expected order type to be %s but encountered order of different type: %s", orderType, existing.OrderType)
+			}
+
+			existingPrice := types.MustNewDecFromStr(existing.Price)
+			if existingPrice.Equal(newStartPrice) {
+				shouldPlace = false
+				break
+			}
+
+			if orderType == tradebinTypes.OrderTypeBuy && existingPrice.LT(newStartPrice) {
+				shouldPlace = true
+				break
+			} else if orderType == tradebinTypes.OrderTypeSell && existingPrice.GT(newStartPrice) {
+				shouldPlace = true
+				break
+			}
 		}
 
-		existingPrice := types.MustNewDecFromStr(existing.Price)
-		if existingPrice.Equal(*startPrice) {
-			continue
+		if shouldPlace {
+			randAmount := internal.MustRandomInt(minAmount, maxAmount)
+			msg := tradebinTypes.NewMsgCreateOrder(
+				o.addressProvider.GetAddress().String(),
+				orderType,
+				randAmount.String(),
+				internal.TrimAmountTrailingZeros(newStartPrice.String()),
+				existingOrders[0].MarketId,
+			)
+			newOrdersMsgs = append(newOrdersMsgs, msg)
+			neededOrders--
 		}
-
-		randAmount := internal.MustRandomInt(minAmount, maxAmount)
-
-		msg := tradebinTypes.NewMsgCreateOrder(
-			o.addressProvider.GetAddress().String(),
-			orderType,
-			randAmount.String(),
-			internal.TrimAmountTrailingZeros(newStartPrice.String()),
-			existing.MarketId,
-		)
 
 		if orderType == tradebinTypes.OrderTypeBuy {
 			newStartPrice = newStartPrice.Sub(*o.ordersConfig.GetPriceStepDec())
 		} else {
 			newStartPrice = newStartPrice.Add(*o.ordersConfig.GetPriceStepDec())
 		}
-
-		newOrdersMsgs = append(newOrdersMsgs, msg)
-		neededOrders--
-		if neededOrders == 0 {
-			break
-		}
-	}
-
-	if neededOrders > 0 {
-		l.Info("not enough existing orders to fill the needed number of orders")
-		for neededOrders > 0 {
-			randAmount := internal.MustRandomInt(minAmount, maxAmount)
-			msg := tradebinTypes.NewMsgCreateOrder(
-				o.addressProvider.GetAddress().String(),
-				existingOrders[0].MarketId,
-				orderType,
-				internal.TrimAmountTrailingZeros(newStartPrice.String()),
-				randAmount.String(),
-			)
-			newOrdersMsgs = append(newOrdersMsgs, msg)
-			if orderType == tradebinTypes.OrderTypeBuy {
-				newStartPrice = newStartPrice.Sub(*o.ordersConfig.GetPriceStepDec())
-			} else {
-				newStartPrice = newStartPrice.Add(*o.ordersConfig.GetPriceStepDec())
-			}
-			neededOrders--
-		}
 	}
 
 	l.Info("submitting new orders")
 
-	return o.orderSubmitter.AddOrders(newOrdersMsgs[:1])
+	return o.orderSubmitter.AddOrders(newOrdersMsgs)
 }
 
 func (o *Orders) getStartPrice(biggestBuy *types.Dec, smallestSell *types.Dec) *types.Dec {
