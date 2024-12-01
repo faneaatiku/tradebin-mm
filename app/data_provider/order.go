@@ -197,3 +197,37 @@ func (o *Order) getAggregatedOrdersQueryParams(marketId, orderType string) *type
 func (o *Order) getOrderKey(marketId, orderType, orderId string) string {
 	return fmt.Sprintf(orderKeyPrefix, marketId, orderType, orderId)
 }
+
+func (o *Order) GetLastMarketOrder(marketId string) (*types.HistoryOrder, error) {
+	o.logger.Debug("getting tradebin query client")
+	qc, err := o.provider.GetTradebinQueryClient()
+	if err != nil {
+		return nil, err
+	}
+
+	params := o.getHistoryQueryParams(marketId, 1)
+	o.logger.Info("fetching market history from blockchain")
+
+	res, err := qc.MarketHistory(context.Background(), params)
+	if err != nil {
+		return nil, err
+	}
+	o.logger.Info("market history orders fetched")
+
+	l := res.GetList()
+	if len(l) == 0 {
+		return nil, nil
+	}
+
+	return &l[0], nil
+}
+
+func (o *Order) getHistoryQueryParams(marketId string, limit uint64) *types.QueryMarketHistoryRequest {
+	return &types.QueryMarketHistoryRequest{
+		Market: marketId,
+		Pagination: &query.PageRequest{
+			Limit:   limit,
+			Reverse: true,
+		},
+	}
+}

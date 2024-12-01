@@ -11,6 +11,10 @@ import (
 	"tradebin-mm/app/internal"
 )
 
+const (
+	cancelOrdersDelta = 5
+)
+
 type balanceProvider interface {
 	GetAddressBalancesForMarket(address string, marketId data_provider.MarketProvider) (*dto.MarketBalance, error)
 }
@@ -23,6 +27,7 @@ type ordersProvider interface {
 	GetActiveBuyOrders(marketId string) ([]tradebinTypes.AggregatedOrder, error)
 	GetActiveSellOrders(marketId string) ([]tradebinTypes.AggregatedOrder, error)
 	GetAddressActiveOrders(marketId, address string, limit int) (buys, sells []tradebinTypes.Order, err error)
+	GetLastMarketOrder(marketId string) (*tradebinTypes.HistoryOrder, error)
 }
 
 type orderSubmitter interface {
@@ -88,15 +93,13 @@ func (o *Orders) FillOrderBook() error {
 	}
 
 	myOrdersCount := len(myBuys) + len(mySells)
-
-	if myOrdersCount == requiredOrders {
-		o.l.Info("no orders to fill: required number of orders already placed")
-
-		return nil
-	} else if myOrdersCount > requiredOrders {
+	if myOrdersCount > (requiredOrders + cancelOrdersDelta) {
 		o.l.Info("too many orders placed, cancelling some")
 
-		return o.cancelExtraOrders(myBuys, mySells)
+		err = o.cancelExtraOrders(myBuys, mySells)
+		if err != nil {
+			o.l.WithError(err).Errorf("failed to cancel extra orders")
+		}
 	}
 
 	buys, sells, err := o.getActiveOrders(balances)
@@ -105,21 +108,32 @@ func (o *Orders) FillOrderBook() error {
 	}
 
 	bBuy, sSell := o.getSpread(buys, sells)
-	startPrice := o.getStartPrice(bBuy, sSell)
+	startPrice := o.getStartPrice(o.marketConfig.GetMarketId(), bBuy, sSell)
 
-	err = o.fillOrders(sells, startPrice, tradebinTypes.OrderTypeSell, o.ordersConfig.GetSellNo()-len(mySells))
+	err = o.fillOrders(sells, startPrice, tradebinTypes.OrderTypeSell, o.ordersConfig.GetSellNo(), o.buildPricesMap(mySells))
 	if err != nil {
 		return fmt.Errorf("failed to fill sell orders: %v", err)
 	}
 
 	step := o.ordersConfig.GetPriceStepDec()
 	buyStartPrice := startPrice.Sub(*step)
-	err = o.fillOrders(buys, &buyStartPrice, tradebinTypes.OrderTypeBuy, o.ordersConfig.GetSellNo()-len(myBuys))
+	err = o.fillOrders(buys, &buyStartPrice, tradebinTypes.OrderTypeBuy, o.ordersConfig.GetBuyNo(), o.buildPricesMap(myBuys))
 	if err != nil {
 		return fmt.Errorf("failed to fill sell orders: %v", err)
 	}
 
 	return nil
+}
+
+func (o *Orders) buildPricesMap(orders []tradebinTypes.Order) map[string]struct{} {
+	prices := make(map[string]struct{})
+	for _, order := range orders {
+		//for safety, we convert it to dec and trim trailing zeros to make sure the prices are unique
+		orderPriceDec := types.MustNewDecFromStr(order.Price)
+		prices[internal.TrimAmountTrailingZeros(orderPriceDec.String())] = struct{}{}
+	}
+
+	return prices
 }
 
 func (o *Orders) getBalances() (*dto.MarketBalance, error) {
@@ -143,7 +157,7 @@ func (o *Orders) getBalances() (*dto.MarketBalance, error) {
 	return balances, nil
 }
 
-func (o *Orders) fillOrders(existingOrders []tradebinTypes.AggregatedOrder, startPrice *types.Dec, orderType string, neededOrders int) error {
+func (o *Orders) fillOrders(existingOrders []tradebinTypes.AggregatedOrder, startPrice *types.Dec, orderType string, neededOrders int, excludedPrices map[string]struct{}) error {
 	l := o.l.WithField("orderType", orderType)
 
 	l.Info("start building order add messages")
@@ -151,13 +165,27 @@ func (o *Orders) fillOrders(existingOrders []tradebinTypes.AggregatedOrder, star
 		l.Info("no orders needed to be placed")
 		return nil
 	}
+
 	minAmount := o.ordersConfig.GetOrderMinAmount()
 	maxAmount := o.ordersConfig.GetOrderMaxAmount()
 	newStartPrice := *startPrice
-
 	var newOrdersMsgs []*tradebinTypes.MsgCreateOrder
 	l.Info("not enough existing orders to fill the needed number of orders")
 	for neededOrders > 0 {
+		//excluded prices ar the prices we already have an order for
+		if _, ok := excludedPrices[internal.TrimAmountTrailingZeros(newStartPrice.String())]; ok {
+			l.WithField("excluded_prices", excludedPrices).Debugf("found excluded price: %s", newStartPrice.String())
+
+			if orderType == tradebinTypes.OrderTypeBuy {
+				newStartPrice = newStartPrice.Sub(*o.ordersConfig.GetPriceStepDec())
+			} else {
+				newStartPrice = newStartPrice.Add(*o.ordersConfig.GetPriceStepDec())
+			}
+
+			neededOrders--
+			continue
+		}
+
 		shouldPlace := true
 		for _, existing := range existingOrders {
 			if existing.OrderType != orderType {
@@ -199,12 +227,44 @@ func (o *Orders) fillOrders(existingOrders []tradebinTypes.AggregatedOrder, star
 		}
 	}
 
+	if len(newOrdersMsgs) == 0 {
+		l.Debug("no new orders to fill")
+		return nil
+	}
+
 	l.Info("submitting new orders")
 
 	return o.orderSubmitter.AddOrders(newOrdersMsgs)
 }
 
-func (o *Orders) getStartPrice(biggestBuy *types.Dec, smallestSell *types.Dec) *types.Dec {
+func (o *Orders) getStartPrice(marketId string, biggestBuy *types.Dec, smallestSell *types.Dec) *types.Dec {
+	history, err := o.ordersProvider.GetLastMarketOrder(marketId)
+	if history == nil {
+		//in this case fallback on taking the price from the spread
+		if err != nil {
+			o.l.WithError(err).Error("failed to get last order for market")
+		}
+
+		return o.getStartPriceFromSpread(biggestBuy, smallestSell)
+	}
+
+	histPrice := types.MustNewDecFromStr(history.Price)
+	if !histPrice.IsPositive() {
+
+		return o.getStartPriceFromSpread(biggestBuy, smallestSell)
+	}
+
+	if history.GetOrderType() == tradebinTypes.OrderTypeSell {
+		step := o.ordersConfig.GetPriceStepDec()
+		start := histPrice.Add(*step)
+
+		return &start
+	}
+
+	return &histPrice
+}
+
+func (o *Orders) getStartPriceFromSpread(biggestBuy *types.Dec, smallestSell *types.Dec) *types.Dec {
 	if biggestBuy.IsZero() && smallestSell.IsZero() {
 		//start from configured price
 		return o.ordersConfig.GetStartPriceDec()
