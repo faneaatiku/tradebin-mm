@@ -20,7 +20,8 @@ volume:
 wallet:
     mnemonic: "your SUPER SECRET mnemonic" # the mnemonic of the wallet
 client:
-    grpc: "grpc.getbze.com:443" # the host of the gRPC server
+    grpc: "grpc:443" # the host of the gRPC server
+    tls: false
 transaction:
     gas_adjustment: 1.5 # the gas adjustment to use for transactions
     gas_prices: "0.1ubze" # the gas prices to use for transactions

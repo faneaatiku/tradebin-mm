@@ -182,7 +182,7 @@ func startMarketMaking(cfg *config.Config, l logrus.FieldLogger) {
 func getGrpcClient(cl config.Client) (*client.GrpcClient, error) {
 	locker := lock.GetInMemoryLocker()
 
-	return client.NewGrpcClient(cl.Grpc, locker)
+	return client.NewGrpcClient(cl.Grpc, cl.TLSEnabled, locker)
 }
 
 func addSigtermHandler(done chan<- bool) {

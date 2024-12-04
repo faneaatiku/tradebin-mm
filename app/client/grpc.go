@@ -24,11 +24,12 @@ type ConnectionLocker interface {
 
 type GrpcClient struct {
 	host   string
+	useTLS bool
 	locker ConnectionLocker
 	conn   *grpc.ClientConn
 }
 
-func NewGrpcClient(host string, locker ConnectionLocker) (*GrpcClient, error) {
+func NewGrpcClient(host string, useTls bool, locker ConnectionLocker) (*GrpcClient, error) {
 	if host == "" {
 		return nil, fmt.Errorf("grpc host is required")
 	}
@@ -40,6 +41,7 @@ func NewGrpcClient(host string, locker ConnectionLocker) (*GrpcClient, error) {
 	return &GrpcClient{
 		host:   host,
 		locker: locker,
+		useTLS: useTls,
 	}, nil
 }
 
@@ -70,14 +72,21 @@ func (c *GrpcClient) getConnection() (*grpc.ClientConn, error) {
 		return c.conn, nil
 	}
 
-	cred, err := c.loadTLSCredentials()
-	if err != nil {
-		return nil, err
+	var dialOptions []grpc.DialOption
+	if c.useTLS {
+		cred, err := c.loadTLSCredentials()
+		if err != nil {
+			return nil, err
+		}
+		
+		dialOptions = append(dialOptions, grpc.WithTransportCredentials(cred))
+	} else {
+		dialOptions = append(dialOptions, grpc.WithInsecure())
 	}
 
 	grpcConn, err := grpc.Dial(
 		c.host,
-		grpc.WithTransportCredentials(cred),
+		dialOptions...,
 	)
 
 	if err != nil {

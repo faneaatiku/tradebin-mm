@@ -7,7 +7,8 @@ func NewConfigError(msg string) error {
 }
 
 type Client struct {
-	Grpc string `yaml:"grpc"`
+	Grpc       string `yaml:"grpc"`
+	TLSEnabled bool   `yaml:"tls"`
 }
 
 func (c *Client) Validate() error {
