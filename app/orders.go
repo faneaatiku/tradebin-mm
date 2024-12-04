@@ -5,7 +5,6 @@ import (
 	tradebinTypes "github.com/bze-alphateam/bze/x/tradebin/types"
 	"github.com/cosmos/cosmos-sdk/types"
 	"github.com/sirupsen/logrus"
-	"sync"
 	"tradebin-mm/app/data_provider"
 	"tradebin-mm/app/dto"
 	"tradebin-mm/app/internal"
@@ -17,6 +16,7 @@ const (
 
 type balanceProvider interface {
 	GetAddressBalancesForMarket(address string, marketId data_provider.MarketProvider) (*dto.MarketBalance, error)
+	GetMarketBalance(address string, marketCfg data_provider.MarketProvider) (*dto.MarketBalance, error)
 }
 
 type addressProvider interface {
@@ -24,8 +24,7 @@ type addressProvider interface {
 }
 
 type ordersProvider interface {
-	GetActiveBuyOrders(marketId string) ([]tradebinTypes.AggregatedOrder, error)
-	GetActiveSellOrders(marketId string) ([]tradebinTypes.AggregatedOrder, error)
+	GetActiveOrders(mb *dto.MarketBalance) (buys, sells []tradebinTypes.AggregatedOrder, err error)
 	GetAddressActiveOrders(marketId, address string, limit int) (buys, sells []tradebinTypes.Order, err error)
 	GetLastMarketOrder(marketId string) (*tradebinTypes.HistoryOrder, error)
 }
@@ -80,44 +79,44 @@ func NewOrdersFiller(
 	}, nil
 }
 
-func (o *Orders) FillOrderBook() error {
-	balances, err := o.getBalances()
+func (v *Orders) FillOrderBook() error {
+	balances, err := v.balanceProvider.GetMarketBalance(v.addressProvider.GetAddress().String(), v.marketConfig)
 	if err != nil {
 		return fmt.Errorf("failed to get balances: %v", err)
 	}
 
-	requiredOrders := o.ordersConfig.GetBuyNo() + o.ordersConfig.GetSellNo()
-	myBuys, mySells, err := o.ordersProvider.GetAddressActiveOrders(balances.MarketId, o.addressProvider.GetAddress().String(), requiredOrders*2)
+	requiredOrders := v.ordersConfig.GetBuyNo() + v.ordersConfig.GetSellNo()
+	myBuys, mySells, err := v.ordersProvider.GetAddressActiveOrders(balances.MarketId, v.addressProvider.GetAddress().String(), requiredOrders*2)
 	if err != nil {
 		return fmt.Errorf("failed to get address active orders: %v", err)
 	}
 
 	myOrdersCount := len(myBuys) + len(mySells)
 	if myOrdersCount > (requiredOrders + cancelOrdersDelta) {
-		o.l.Info("too many orders placed, cancelling some")
+		v.l.Info("too many orders placed, cancelling some")
 
-		err = o.cancelExtraOrders(myBuys, mySells)
+		err = v.cancelExtraOrders(myBuys, mySells)
 		if err != nil {
-			o.l.WithError(err).Errorf("failed to cancel extra orders")
+			v.l.WithError(err).Errorf("failed to cancel extra orders")
 		}
 	}
 
-	buys, sells, err := o.getActiveOrders(balances)
+	buys, sells, err := v.ordersProvider.GetActiveOrders(balances)
 	if err != nil {
 		return err
 	}
 
-	bBuy, sSell := o.getSpread(buys, sells)
-	startPrice := o.getStartPrice(o.marketConfig.GetMarketId(), bBuy, sSell)
+	bBuy, sSell := v.getSpread(buys, sells)
+	startPrice := v.getStartPrice(v.marketConfig.GetMarketId(), bBuy, sSell)
 
-	err = o.fillOrders(sells, startPrice, tradebinTypes.OrderTypeSell, o.ordersConfig.GetSellNo(), o.buildPricesMap(mySells))
+	err = v.fillOrders(sells, startPrice, tradebinTypes.OrderTypeSell, v.ordersConfig.GetSellNo(), v.buildPricesMap(mySells))
 	if err != nil {
 		return fmt.Errorf("failed to fill sell orders: %v", err)
 	}
 
-	step := o.ordersConfig.GetPriceStepDec()
+	step := v.ordersConfig.GetPriceStepDec()
 	buyStartPrice := startPrice.Sub(*step)
-	err = o.fillOrders(buys, &buyStartPrice, tradebinTypes.OrderTypeBuy, o.ordersConfig.GetBuyNo(), o.buildPricesMap(myBuys))
+	err = v.fillOrders(buys, &buyStartPrice, tradebinTypes.OrderTypeBuy, v.ordersConfig.GetBuyNo(), v.buildPricesMap(myBuys))
 	if err != nil {
 		return fmt.Errorf("failed to fill sell orders: %v", err)
 	}
@@ -125,7 +124,7 @@ func (o *Orders) FillOrderBook() error {
 	return nil
 }
 
-func (o *Orders) buildPricesMap(orders []tradebinTypes.Order) map[string]struct{} {
+func (v *Orders) buildPricesMap(orders []tradebinTypes.Order) map[string]struct{} {
 	prices := make(map[string]struct{})
 	for _, order := range orders {
 		//for safety, we convert it to dec and trim trailing zeros to make sure the prices are unique
@@ -136,29 +135,8 @@ func (o *Orders) buildPricesMap(orders []tradebinTypes.Order) map[string]struct{
 	return prices
 }
 
-func (o *Orders) getBalances() (*dto.MarketBalance, error) {
-	balances, err := o.balanceProvider.GetAddressBalancesForMarket(o.addressProvider.GetAddress().String(), o.marketConfig)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get address balances for market: %v", err)
-	}
-
-	if balances == nil {
-		return nil, fmt.Errorf("failed to get address balances for market")
-	}
-
-	if balances.QuoteBalance == nil || !balances.QuoteBalance.IsPositive() {
-		return nil, fmt.Errorf("no balance found for %s", o.marketConfig.GetQuoteDenom())
-	}
-
-	if balances.BaseBalance == nil || !balances.BaseBalance.IsPositive() {
-		return nil, fmt.Errorf("no balance found for %s", o.marketConfig.GetQuoteDenom())
-	}
-
-	return balances, nil
-}
-
-func (o *Orders) fillOrders(existingOrders []tradebinTypes.AggregatedOrder, startPrice *types.Dec, orderType string, neededOrders int, excludedPrices map[string]struct{}) error {
-	l := o.l.WithField("orderType", orderType)
+func (v *Orders) fillOrders(existingOrders []tradebinTypes.AggregatedOrder, startPrice *types.Dec, orderType string, neededOrders int, excludedPrices map[string]struct{}) error {
+	l := v.l.WithField("orderType", orderType)
 
 	l.Info("start building order add messages")
 	if neededOrders <= 0 {
@@ -166,20 +144,18 @@ func (o *Orders) fillOrders(existingOrders []tradebinTypes.AggregatedOrder, star
 		return nil
 	}
 
-	minAmount := o.ordersConfig.GetOrderMinAmount()
-	maxAmount := o.ordersConfig.GetOrderMaxAmount()
+	minAmount := v.ordersConfig.GetOrderMinAmount()
+	maxAmount := v.ordersConfig.GetOrderMaxAmount()
 	newStartPrice := *startPrice
 	var newOrdersMsgs []*tradebinTypes.MsgCreateOrder
 	l.Info("not enough existing orders to fill the needed number of orders")
 	for neededOrders > 0 {
 		//excluded prices ar the prices we already have an order for
 		if _, ok := excludedPrices[internal.TrimAmountTrailingZeros(newStartPrice.String())]; ok {
-			l.WithField("excluded_prices", excludedPrices).Debugf("found excluded price: %s", newStartPrice.String())
-
 			if orderType == tradebinTypes.OrderTypeBuy {
-				newStartPrice = newStartPrice.Sub(*o.ordersConfig.GetPriceStepDec())
+				newStartPrice = newStartPrice.Sub(*v.ordersConfig.GetPriceStepDec())
 			} else {
-				newStartPrice = newStartPrice.Add(*o.ordersConfig.GetPriceStepDec())
+				newStartPrice = newStartPrice.Add(*v.ordersConfig.GetPriceStepDec())
 			}
 
 			neededOrders--
@@ -210,7 +186,7 @@ func (o *Orders) fillOrders(existingOrders []tradebinTypes.AggregatedOrder, star
 		if shouldPlace {
 			randAmount := internal.MustRandomInt(minAmount, maxAmount)
 			msg := tradebinTypes.NewMsgCreateOrder(
-				o.addressProvider.GetAddress().String(),
+				v.addressProvider.GetAddress().String(),
 				orderType,
 				randAmount.String(),
 				internal.TrimAmountTrailingZeros(newStartPrice.String()),
@@ -221,9 +197,9 @@ func (o *Orders) fillOrders(existingOrders []tradebinTypes.AggregatedOrder, star
 		}
 
 		if orderType == tradebinTypes.OrderTypeBuy {
-			newStartPrice = newStartPrice.Sub(*o.ordersConfig.GetPriceStepDec())
+			newStartPrice = newStartPrice.Sub(*v.ordersConfig.GetPriceStepDec())
 		} else {
-			newStartPrice = newStartPrice.Add(*o.ordersConfig.GetPriceStepDec())
+			newStartPrice = newStartPrice.Add(*v.ordersConfig.GetPriceStepDec())
 		}
 	}
 
@@ -234,28 +210,28 @@ func (o *Orders) fillOrders(existingOrders []tradebinTypes.AggregatedOrder, star
 
 	l.Info("submitting new orders")
 
-	return o.orderSubmitter.AddOrders(newOrdersMsgs)
+	return v.orderSubmitter.AddOrders(newOrdersMsgs)
 }
 
-func (o *Orders) getStartPrice(marketId string, biggestBuy *types.Dec, smallestSell *types.Dec) *types.Dec {
-	history, err := o.ordersProvider.GetLastMarketOrder(marketId)
+func (v *Orders) getStartPrice(marketId string, biggestBuy *types.Dec, smallestSell *types.Dec) *types.Dec {
+	history, err := v.ordersProvider.GetLastMarketOrder(marketId)
 	if history == nil {
 		//in this case fallback on taking the price from the spread
 		if err != nil {
-			o.l.WithError(err).Error("failed to get last order for market")
+			v.l.WithError(err).Error("failed to get last order for market")
 		}
 
-		return o.getStartPriceFromSpread(biggestBuy, smallestSell)
+		return v.getStartPriceFromSpread(biggestBuy, smallestSell)
 	}
 
 	histPrice := types.MustNewDecFromStr(history.Price)
 	if !histPrice.IsPositive() {
 
-		return o.getStartPriceFromSpread(biggestBuy, smallestSell)
+		return v.getStartPriceFromSpread(biggestBuy, smallestSell)
 	}
 
 	if history.GetOrderType() == tradebinTypes.OrderTypeSell {
-		step := o.ordersConfig.GetPriceStepDec()
+		step := v.ordersConfig.GetPriceStepDec()
 		start := histPrice.Add(*step)
 
 		return &start
@@ -264,17 +240,17 @@ func (o *Orders) getStartPrice(marketId string, biggestBuy *types.Dec, smallestS
 	return &histPrice
 }
 
-func (o *Orders) getStartPriceFromSpread(biggestBuy *types.Dec, smallestSell *types.Dec) *types.Dec {
+func (v *Orders) getStartPriceFromSpread(biggestBuy *types.Dec, smallestSell *types.Dec) *types.Dec {
 	if biggestBuy.IsZero() && smallestSell.IsZero() {
 		//start from configured price
-		return o.ordersConfig.GetStartPriceDec()
+		return v.ordersConfig.GetStartPriceDec()
 	}
 
 	if biggestBuy.IsZero() {
 		//start from the smallest sell, there's no buy to use
 		return smallestSell
 	}
-	step := o.ordersConfig.GetPriceStepDec()
+	step := v.ordersConfig.GetPriceStepDec()
 
 	if smallestSell.IsZero() {
 		//start from the biggest buy price + step
@@ -296,18 +272,18 @@ func (o *Orders) getStartPriceFromSpread(biggestBuy *types.Dec, smallestSell *ty
 	return &start
 }
 
-func (o *Orders) cancelExtraOrders(buys []tradebinTypes.Order, sells []tradebinTypes.Order) error {
-	if len(buys) > o.ordersConfig.GetBuyNo() {
+func (v *Orders) cancelExtraOrders(buys []tradebinTypes.Order, sells []tradebinTypes.Order) error {
+	if len(buys) > v.ordersConfig.GetBuyNo() {
 		internal.SortOrdersByPrice(buys, false)
-		err := o.cancelOrders(buys, len(buys)-o.ordersConfig.GetBuyNo())
+		err := v.cancelOrders(buys, len(buys)-v.ordersConfig.GetBuyNo())
 		if err != nil {
 			return fmt.Errorf("failed to cancel extra buy orders: %v", err)
 		}
 	}
 
-	if len(sells) > o.ordersConfig.GetSellNo() {
+	if len(sells) > v.ordersConfig.GetSellNo() {
 		internal.SortOrdersByPrice(sells, true)
-		err := o.cancelOrders(sells, len(sells)-o.ordersConfig.GetSellNo())
+		err := v.cancelOrders(sells, len(sells)-v.ordersConfig.GetSellNo())
 		if err != nil {
 			return fmt.Errorf("failed to cancel extra sell orders: %v", err)
 		}
@@ -316,14 +292,14 @@ func (o *Orders) cancelExtraOrders(buys []tradebinTypes.Order, sells []tradebinT
 	return nil
 }
 
-func (o *Orders) cancelOrders(sortedOrders []tradebinTypes.Order, limit int) error {
+func (v *Orders) cancelOrders(sortedOrders []tradebinTypes.Order, limit int) error {
 	var msgs []*tradebinTypes.MsgCancelOrder
 	for _, order := range sortedOrders[:limit] {
-		m := tradebinTypes.NewMsgCancelOrder(o.addressProvider.GetAddress().String(), order.MarketId, order.Id, order.OrderType)
+		m := tradebinTypes.NewMsgCancelOrder(v.addressProvider.GetAddress().String(), order.MarketId, order.Id, order.OrderType)
 		msgs = append(msgs, m)
 	}
 
-	err := o.orderSubmitter.CancelOrders(msgs)
+	err := v.orderSubmitter.CancelOrders(msgs)
 	if err != nil {
 		return fmt.Errorf("failed to cancel order: %v", err)
 	}
@@ -331,7 +307,7 @@ func (o *Orders) cancelOrders(sortedOrders []tradebinTypes.Order, limit int) err
 	return nil
 }
 
-func (o *Orders) getSpread(buys, sells []tradebinTypes.AggregatedOrder) (biggestBuy *types.Dec, smallestSell *types.Dec) {
+func (v *Orders) getSpread(buys, sells []tradebinTypes.AggregatedOrder) (biggestBuy *types.Dec, smallestSell *types.Dec) {
 	b := types.ZeroDec()
 	s := types.ZeroDec()
 
@@ -344,30 +320,4 @@ func (o *Orders) getSpread(buys, sells []tradebinTypes.AggregatedOrder) (biggest
 	}
 
 	return &b, &s
-}
-
-func (o *Orders) getActiveOrders(mb *dto.MarketBalance) (buys, sells []tradebinTypes.AggregatedOrder, err error) {
-	wg := sync.WaitGroup{}
-	wg.Add(2)
-	go func() {
-		defer wg.Done()
-		var rErr error
-		buys, rErr = o.ordersProvider.GetActiveBuyOrders(mb.MarketId)
-		if rErr != nil {
-			err = fmt.Errorf("failed to get active buy orders: %v", rErr)
-		}
-	}()
-
-	go func() {
-		defer wg.Done()
-		var rErr error
-		sells, rErr = o.ordersProvider.GetActiveSellOrders(mb.MarketId)
-		if rErr != nil {
-			err = fmt.Errorf("failed to get active buy orders: %v", rErr)
-		}
-	}()
-
-	wg.Wait()
-
-	return buys, sells, err
 }

@@ -65,6 +65,18 @@ type Volume struct {
 	TradeInterval float64 `yaml:"trade_interval"`
 }
 
+func (v *Volume) GetMin() int64 {
+	return int64(v.Min)
+}
+
+func (v *Volume) GetMax() int64 {
+	return int64(v.Max)
+}
+
+func (v *Volume) GetTradeInterval() int {
+	return int(v.TradeInterval)
+}
+
 func (v *Volume) Validate() error {
 	if v.Min <= 0 {
 		return NewConfigError("min is required")

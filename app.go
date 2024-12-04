@@ -19,8 +19,6 @@ type volumeMaker interface {
 }
 
 type App struct {
-	done chan bool
-
 	l logrus.FieldLogger
 	v volumeMaker
 	f marketFiller
@@ -32,10 +30,9 @@ func NewApp(l logrus.FieldLogger, v volumeMaker, f marketFiller) (*App, error) {
 	}
 
 	return &App{
-		done: make(chan bool),
-		l:    l,
-		v:    v,
-		f:    f,
+		l: l.WithField("service", "APP"),
+		v: v,
+		f: f,
 	}, nil
 }
 
@@ -55,10 +52,10 @@ func (a *App) execute() {
 		return
 	}
 
-	//err = a.v.MakeVolume()
-	//if err != nil {
-	//	a.l.WithError(err).Errorf("error encountered while making volume")
-	//}
+	err = a.v.MakeVolume()
+	if err != nil {
+		a.l.WithError(err).Errorf("error encountered while making volume")
+	}
 }
 
 func (a *App) afterExecute() {

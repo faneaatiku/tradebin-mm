@@ -5,6 +5,8 @@ import (
 	"github.com/sirupsen/logrus"
 	"log"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 	"tradebin-mm/app"
 	"tradebin-mm/app/cache"
@@ -111,11 +113,6 @@ func startMarketMaking(cfg *config.Config, l logrus.FieldLogger) {
 		log.Fatalf("could not create grpc client: %v", err)
 	}
 
-	volume, err := app.NewVolumeMaker(l)
-	if err != nil {
-		log.Fatalf("could not create volume maker: %v", err)
-	}
-
 	balances, err := data_provider.NewBalanceDataProvider(l, grpc)
 	if err != nil {
 		log.Fatalf("could not create balance data provider: %v", err)
@@ -136,6 +133,20 @@ func startMarketMaking(cfg *config.Config, l logrus.FieldLogger) {
 		log.Fatalf("could not create order service: %v", err)
 	}
 
+	volume, err := app.NewVolumeMaker(
+		&cfg.Volume,
+		l,
+		&cfg.Market,
+		balances,
+		w,
+		orderData,
+		oService,
+		lock.GetInMemoryLocker(),
+	)
+	if err != nil {
+		log.Fatalf("could not create volume maker: %v", err)
+	}
+
 	orders, err := app.NewOrdersFiller(
 		l,
 		&cfg.Orders,
@@ -146,24 +157,39 @@ func startMarketMaking(cfg *config.Config, l logrus.FieldLogger) {
 		oService,
 	)
 
-	//var done = make(chan bool)
+	if err != nil {
+		log.Fatalf("could not create orders maker: %v", err)
+	}
+
 	a, err := NewApp(l, volume, orders)
 	if err != nil {
 		log.Fatalf("could not create app: %v", err)
 	}
 
-	//go a.Start()
-	//<-done
-	a.Start()
+	var done = make(chan bool)
+	addSigtermHandler(done)
 
-	fmt.Print("program finished. closing in 5 seconds")
-	time.Sleep(5 * time.Second)
+	go a.Start()
+	<-done
+
+	fmt.Print("program finished. closing in 2 seconds")
+	time.Sleep(2 * time.Second)
 
 	fmt.Print("program closed")
+	os.Exit(0)
 }
 
 func getGrpcClient(cl config.Client) (*client.GrpcClient, error) {
 	locker := lock.GetInMemoryLocker()
 
 	return client.NewGrpcClient(cl.Grpc, locker)
+}
+
+func addSigtermHandler(done chan<- bool) {
+	c := make(chan os.Signal, 2)
+	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<-c
+		done <- true
+	}()
 }

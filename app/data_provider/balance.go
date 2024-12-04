@@ -88,3 +88,24 @@ func (b *Balance) GetAddressBalances(address string) ([]*basev1beta1.Coin, error
 
 	return res.Balances, nil
 }
+
+func (b *Balance) GetMarketBalance(address string, marketCfg MarketProvider) (*dto.MarketBalance, error) {
+	balances, err := b.GetAddressBalancesForMarket(address, marketCfg)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get address balances for market: %v", err)
+	}
+
+	if balances == nil {
+		return nil, fmt.Errorf("failed to get address balances for market")
+	}
+
+	if balances.QuoteBalance == nil || !balances.QuoteBalance.IsPositive() {
+		return nil, fmt.Errorf("no balance found for %s", marketCfg.GetQuoteDenom())
+	}
+
+	if balances.BaseBalance == nil || !balances.BaseBalance.IsPositive() {
+		return nil, fmt.Errorf("no balance found for %s", marketCfg.GetQuoteDenom())
+	}
+
+	return balances, nil
+}

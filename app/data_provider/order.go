@@ -6,7 +6,9 @@ import (
 	"github.com/bze-alphateam/bze/x/tradebin/types"
 	"github.com/cosmos/cosmos-sdk/types/query"
 	"github.com/sirupsen/logrus"
+	"sync"
 	"time"
+	"tradebin-mm/app/dto"
 	"tradebin-mm/app/internal"
 )
 
@@ -73,7 +75,6 @@ func (o *Order) GetAddressActiveOrders(marketId, address string, limit int) ([]t
 	var buys []types.Order
 	var sells []types.Order
 	for _, order := range res.GetList() {
-		o.logger.Debug("order reference", order)
 		fullOrder, err := o.GetCachedOrder(marketId, order.OrderType, order.Id)
 		if err != nil {
 			o.logger.Errorf("failed to get order: %v", err)
@@ -230,4 +231,30 @@ func (o *Order) getHistoryQueryParams(marketId string, limit uint64) *types.Quer
 			Reverse: true,
 		},
 	}
+}
+
+func (o *Order) GetActiveOrders(mb *dto.MarketBalance) (buys, sells []types.AggregatedOrder, err error) {
+	wg := sync.WaitGroup{}
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		var rErr error
+		buys, rErr = o.GetActiveBuyOrders(mb.MarketId)
+		if rErr != nil {
+			err = fmt.Errorf("failed to get active buy orders: %v", rErr)
+		}
+	}()
+
+	go func() {
+		defer wg.Done()
+		var rErr error
+		sells, rErr = o.GetActiveSellOrders(mb.MarketId)
+		if rErr != nil {
+			err = fmt.Errorf("failed to get active buy orders: %v", rErr)
+		}
+	}()
+
+	wg.Wait()
+
+	return buys, sells, err
 }
