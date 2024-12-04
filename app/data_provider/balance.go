@@ -84,7 +84,7 @@ func (b *Balance) GetAddressBalances(address string) ([]*basev1beta1.Coin, error
 	if err != nil {
 		return nil, err
 	}
-	b.logger.Info("balances fetched")
+	b.logger.Debug("balances fetched")
 
 	return res.Balances, nil
 }

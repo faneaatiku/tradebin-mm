@@ -31,13 +31,13 @@ func (o *History) GetMarketHistory(marketId string, limit uint64, key string) ([
 	}
 
 	params := o.getHistoryQueryParams(marketId, limit, key)
-	o.logger.Info("fetching history orders from blockchain")
+	o.logger.Debug("fetching history orders from blockchain")
 
 	res, err := qc.MarketHistory(context.Background(), params)
 	if err != nil {
 		return nil, "", err
 	}
-	o.logger.Info("history orders fetched")
+	o.logger.Debug("history orders fetched")
 
 	return res.GetList(), string(res.GetPagination().GetNextKey()), nil
 }

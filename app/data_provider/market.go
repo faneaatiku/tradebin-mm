@@ -29,20 +29,20 @@ func NewMarketProvider(cl clientProvider, logger logrus.FieldLogger) (*Market, e
 }
 
 func (m *Market) GetAllMarkets() ([]tradebinTypes.Market, error) {
-	m.logger.Info("getting tradebin query client")
+	m.logger.Debug("getting tradebin query client")
 	qc, err := m.provider.GetTradebinQueryClient()
 	if err != nil {
 		return nil, err
 	}
 
 	params := m.getMarketsParams()
-	m.logger.Info("fetching markets from blockchain")
+	m.logger.Debug("fetching markets from blockchain")
 
 	res, err := qc.MarketAll(context.Background(), params)
 	if err != nil {
 		return nil, err
 	}
-	m.logger.Info("markets fetched")
+	m.logger.Debug("markets fetched")
 
 	return res.GetMarket(), nil
 }

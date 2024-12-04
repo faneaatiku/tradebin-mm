@@ -161,20 +161,20 @@ func (o *Order) GetActiveSellOrders(marketId string) ([]types.AggregatedOrder, e
 }
 
 func (o *Order) getAggregatedOrders(marketId, orderType string) ([]types.AggregatedOrder, error) {
-	o.logger.Info("getting tradebin query client")
+	o.logger.Debug("getting tradebin query client")
 	qc, err := o.provider.GetTradebinQueryClient()
 	if err != nil {
 		return nil, err
 	}
 
 	params := o.getAggregatedOrdersQueryParams(marketId, orderType)
-	o.logger.Info("fetching aggregated orders from blockchain")
+	o.logger.Debug("fetching aggregated orders from blockchain")
 
 	res, err := qc.MarketAggregatedOrders(context.Background(), params)
 	if err != nil {
 		return nil, err
 	}
-	o.logger.Info("aggregated orders fetched")
+	o.logger.Debug("aggregated orders fetched")
 
 	return res.GetList(), nil
 }
@@ -207,13 +207,13 @@ func (o *Order) GetLastMarketOrder(marketId string) (*types.HistoryOrder, error)
 	}
 
 	params := o.getHistoryQueryParams(marketId, 1)
-	o.logger.Info("fetching market history from blockchain")
+	o.logger.Debug("fetching market history from blockchain")
 
 	res, err := qc.MarketHistory(context.Background(), params)
 	if err != nil {
 		return nil, err
 	}
-	o.logger.Info("market history orders fetched")
+	o.logger.Debug("market history orders fetched")
 
 	l := res.GetList()
 	if len(l) == 0 {

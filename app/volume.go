@@ -364,7 +364,7 @@ func (v *Volume) canTryMakeStrategy(balance *sdk.Coin, marketOrders []tradebinTy
 
 func (v *Volume) isMyOrder(myOrders []tradebinTypes.Order, order tradebinTypes.AggregatedOrder) bool {
 	for _, my := range myOrders {
-		if my.Price == order.Price && my.OrderType == order.OrderType {
+		if my.Price == order.Price && my.OrderType == order.OrderType && my.Amount == order.Amount {
 			return true
 		}
 	}
