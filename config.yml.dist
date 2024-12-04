@@ -14,6 +14,9 @@ volume:
     min: 500000 # the minimum volume to trade
     max: 1000000 # the maximum volume to trade
     trade_interval: 60 # the number of seconds between orders
+    extra_min: 2000000 # the minimum amount to extra trade for higher volume
+    extra_max: 4000000 # the maximum amount to extra trade for higher volume
+    extra_every: 3 # how often to add the maximum amount
 wallet:
     mnemonic: "your SUPER SECRET mnemonic" # the mnemonic of the wallet
 client:

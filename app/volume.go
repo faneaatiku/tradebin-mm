@@ -21,6 +21,9 @@ type volumeConfig interface {
 	GetMin() int64
 	GetMax() int64
 	GetTradeInterval() int
+	GetExtraMin() int64
+	GetExtraMax() int64
+	GetExtraEvery() int64
 }
 
 type volumeStrategy interface {
@@ -31,6 +34,10 @@ type volumeStrategy interface {
 	GetOrderType() string
 	LastRunAt() *time.Time
 	SetLastRunAt(*time.Time)
+	GetExtraMinVolume() *sdk.Int
+	GetExtraMaxVolume() *sdk.Int
+	IncrementTradesCount()
+	GetTradesCount() int64
 }
 
 type locker interface {
@@ -107,10 +114,25 @@ func (v *Volume) MakeVolume() error {
 		return fmt.Errorf("failed to get strategy: %w", err)
 	}
 
-	if strategy.LastRunAt().After(time.Now().Add(-time.Duration(v.cfg.GetTradeInterval()) * time.Second)) {
+	allowedInterval := time.Now().Add(-time.Duration(v.cfg.GetTradeInterval()) * time.Second)
+	if strategy.LastRunAt().After(allowedInterval) {
 		l.Debug("it's not the time to make volume yet")
 
 		return nil
+	}
+
+	history, err := v.ordersProvider.GetLastMarketOrder(balances.MarketId)
+	if err != nil {
+		return fmt.Errorf("failed to get last market order: %w", err)
+	}
+
+	if history != nil {
+		histDate := time.Unix(history.ExecutedAt, 0)
+		if histDate.After(allowedInterval) {
+			l.WithField("hist_date", histDate).Info("market has been active in the last minutes. Will NOT create volume")
+
+			return nil
+		}
 	}
 
 	var bookOrder tradebinTypes.AggregatedOrder
@@ -121,10 +143,10 @@ func (v *Volume) MakeVolume() error {
 	}
 	l.WithField("book_order", bookOrder).Debugf("will fill order of type %s", bookOrder.OrderType)
 
-	order, orderAmount := v.makeOrder(strategy, &bookOrder)
-	l.WithField("order_msg", order).Debug("order message created")
+	order, orderAmount, msgs := v.makeOrder(strategy, &bookOrder)
+	l.WithField("order_msg", order).Info("order message created")
 
-	err = v.orderSubmitter.AddOrders([]*tradebinTypes.MsgCreateOrder{order})
+	err = v.orderSubmitter.AddOrders(msgs)
 	if err != nil {
 		//destroy the strategy maybe it's out of balance and it should change
 		v.strategy = nil
@@ -136,7 +158,7 @@ func (v *Volume) MakeVolume() error {
 	v.ackOrder(orderAmount)
 	l.WithField("order_msg", order).Debug("order acknowledged")
 
-	l.WithField("strategy", strategy).Debug("finished making volume")
+	l.WithField("strategy", strategy).Info("finished making volume")
 
 	return nil
 }
@@ -146,28 +168,55 @@ func (v *Volume) ackOrder(orderAmount sdk.Int) {
 	v.strategy.SetLastRunAt(&now)
 	remaining := v.strategy.GetRemainingAmount().Sub(orderAmount)
 	v.strategy.SetRemainingAmount(&remaining)
+	v.strategy.IncrementTradesCount()
 }
 
-func (v *Volume) makeOrder(strategy volumeStrategy, bookOrder *tradebinTypes.AggregatedOrder) (msg *tradebinTypes.MsgCreateOrder, orderAmount sdk.Int) {
+func (v *Volume) makeOrder(strategy volumeStrategy, bookOrder *tradebinTypes.AggregatedOrder) (msg *tradebinTypes.MsgCreateOrder, orderAmount sdk.Int, msgs []*tradebinTypes.MsgCreateOrder) {
+	l := v.l.WithField("func", "makeOrder")
+	msgs = []*tradebinTypes.MsgCreateOrder{}
+	extraAmount := sdk.ZeroInt()
+	var extraMsg *tradebinTypes.MsgCreateOrder
+	if strategy.GetExtraMaxVolume().IsPositive() && strategy.GetTradesCount()%v.cfg.GetExtraEvery() == 0 {
+		l.Debug("extra volume is required. adding a new order to fill immediately")
+		extraAmount = internal.MustRandomInt(strategy.GetExtraMinVolume(), strategy.GetExtraMaxVolume())
+		if extraAmount.IsPositive() {
+			extraMsg = tradebinTypes.NewMsgCreateOrder(
+				v.addressProvider.GetAddress().String(),
+				bookOrder.GetOrderType(),
+				extraAmount.String(),
+				bookOrder.Price,
+				v.marketConfig.GetMarketId(),
+			)
+
+			l.WithField("extra_order_msg", extraMsg).Debug("extra order message created")
+
+			msgs = append(msgs, extraMsg)
+		}
+	}
+
 	orderAmount = internal.MustRandomInt(strategy.GetMinAmount(), strategy.GetMaxAmount())
-	if orderAmount.GT(*strategy.GetRemainingAmount()) {
+	if !extraAmount.IsPositive() && orderAmount.GT(*strategy.GetRemainingAmount()) {
+		l.Debug("order amount is greater than remaining amount")
 		orderAmount = *strategy.GetRemainingAmount()
 	}
 	bookAmount, _ := sdk.NewIntFromString(bookOrder.Amount)
 
 	if orderAmount.GT(bookAmount) {
+		l.Debug("order amount is greater than book amount")
 		orderAmount = bookAmount
 	}
 
 	msg = tradebinTypes.NewMsgCreateOrder(
 		v.addressProvider.GetAddress().String(),
 		strategy.GetOrderType(),
-		orderAmount.String(),
+		orderAmount.Add(extraAmount).String(),
 		bookOrder.Price,
 		v.marketConfig.GetMarketId(),
 	)
 
-	return msg, orderAmount
+	msgs = append(msgs, msg)
+
+	return msg, orderAmount, msgs
 }
 
 // getStrategy returns the appropriate volumeStrategy to use on the next trade
@@ -195,18 +244,36 @@ func (v *Volume) getStrategy(balances *dto.MarketBalance, buys, sells []tradebin
 		return v.strategy, err
 	}
 
-	if v.strategy.GetOrderType() == tradebinTypes.OrderTypeBuy && len(sells) == 0 {
-		l.Debug("can not use strategy due to missing buy orders. creating new one")
-		v.strategy, err = v.newStrategy(balances, myBuys, mySells, buys, sells)
+	if v.strategy.GetOrderType() == tradebinTypes.OrderTypeBuy {
+		if len(sells) == 0 {
+			l.Debug("can not use strategy due to missing buy orders. creating new one")
+			v.strategy, err = v.newStrategy(balances, myBuys, mySells, buys, sells)
 
-		return v.strategy, err
+			return v.strategy, err
+		}
+
+		if !v.isMyOrder(mySells, sells[0]) {
+			l.Debug("can not use buy strategy because we do not own the first sell. creating new one")
+			v.strategy, err = v.newStrategy(balances, myBuys, mySells, buys, sells)
+
+			return v.strategy, err
+		}
 	}
 
-	if v.strategy.GetOrderType() == tradebinTypes.OrderTypeSell && len(buys) == 0 {
-		l.Debug("can not use strategy due to missing sell orders. creating new one")
-		v.strategy, err = v.newStrategy(balances, myBuys, mySells, buys, sells)
+	if v.strategy.GetOrderType() == tradebinTypes.OrderTypeSell {
+		if len(buys) == 0 {
+			l.Debug("can not use strategy due to missing buy orders. creating new one")
+			v.strategy, err = v.newStrategy(balances, myBuys, mySells, buys, sells)
 
-		return v.strategy, err
+			return v.strategy, err
+		}
+
+		if !v.isMyOrder(myBuys, buys[0]) {
+			l.Debug("can not use sell strategy because we do not own the first buy. creating new one")
+			v.strategy, err = v.newStrategy(balances, myBuys, mySells, buys, sells)
+
+			return v.strategy, err
+		}
 	}
 
 	return v.strategy, nil
@@ -326,11 +393,16 @@ func (v *Volume) makeBaseStrategy(orderType string, myOrders []tradebinTypes.Ord
 	remainingMax := maxVolume.MulRaw(volumeMul)
 	remaining := internal.MustRandomInt(&remainingMin, &remainingMax)
 
+	extraMin := sdk.NewInt(v.cfg.GetExtraMin())
+	extraMax := sdk.NewInt(v.cfg.GetExtraMax())
+
 	return &dto.VolumeStrategy{
 		MinVolume:       &minVolume,
 		MaxVolume:       &maxVolume,
 		RemainingVolume: &remaining,
 		OrderType:       orderType,
 		LastRun:         &time.Time{},
+		ExtraMinVolume:  &extraMin,
+		ExtraMaxVolume:  &extraMax,
 	}
 }

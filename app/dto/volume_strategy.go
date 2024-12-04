@@ -11,10 +11,25 @@ type VolumeStrategy struct {
 	RemainingVolume *sdk.Int
 	OrderType       string
 	LastRun         *time.Time
+	ExtraMinVolume  *sdk.Int
+	ExtraMaxVolume  *sdk.Int
+	TradesCount     int64
+}
+
+func (v *VolumeStrategy) IncrementTradesCount() {
+	v.TradesCount++
+}
+
+func (v *VolumeStrategy) GetTradesCount() int64 {
+	return v.TradesCount
 }
 
 func (v *VolumeStrategy) SetRemainingAmount(amount *sdk.Int) {
 	v.RemainingVolume = amount
+	if !v.RemainingVolume.IsPositive() {
+		zero := sdk.ZeroInt()
+		v.RemainingVolume = &zero
+	}
 }
 
 func (v *VolumeStrategy) LastRunAt() *time.Time {
@@ -39,4 +54,12 @@ func (v *VolumeStrategy) GetRemainingAmount() *sdk.Int {
 
 func (v *VolumeStrategy) GetOrderType() string {
 	return v.OrderType
+}
+
+func (v *VolumeStrategy) GetExtraMinVolume() *sdk.Int {
+	return v.ExtraMinVolume
+}
+
+func (v *VolumeStrategy) GetExtraMaxVolume() *sdk.Int {
+	return v.ExtraMaxVolume
 }

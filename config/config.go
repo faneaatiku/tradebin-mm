@@ -63,6 +63,9 @@ type Volume struct {
 	Min           float64 `yaml:"min"`
 	Max           float64 `yaml:"max"`
 	TradeInterval float64 `yaml:"trade_interval"`
+	ExtraMin      float64 `yaml:"extra_min"`
+	ExtraMax      float64 `yaml:"extra_max"`
+	ExtraEvery    int64   `yaml:"extra_every"`
 }
 
 func (v *Volume) GetMin() int64 {
@@ -75,6 +78,18 @@ func (v *Volume) GetMax() int64 {
 
 func (v *Volume) GetTradeInterval() int {
 	return int(v.TradeInterval)
+}
+
+func (v *Volume) GetExtraMin() int64 {
+	return int64(v.ExtraMin)
+}
+
+func (v *Volume) GetExtraMax() int64 {
+	return int64(v.ExtraMax)
+}
+
+func (v *Volume) GetExtraEvery() int64 {
+	return v.ExtraEvery
 }
 
 func (v *Volume) Validate() error {
@@ -92,6 +107,10 @@ func (v *Volume) Validate() error {
 
 	if v.Min > v.Max {
 		return NewConfigError("min volume is greater than max volume ")
+	}
+
+	if v.ExtraEvery <= 0 {
+		return NewConfigError("extra_every must be higher than 0")
 	}
 
 	return nil
