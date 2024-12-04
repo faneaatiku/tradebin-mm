@@ -171,30 +171,35 @@ func (v *Volume) makeOrder(strategy volumeStrategy, bookOrder *tradebinTypes.Agg
 // If orders needed for this strategy are missing from the order book it creates a new one
 // If the remaining amount of this trade is lower than the required minimum then it creates a new strategy
 func (v *Volume) getStrategy(balances *dto.MarketBalance, buys, sells []tradebinTypes.AggregatedOrder) (volumeStrategy, error) {
+	l := v.l.WithField("func", "getStrategy")
 	myBuys, mySells, err := v.ordersProvider.GetAddressActiveOrders(balances.MarketId, v.addressProvider.GetAddress().String(), 1000)
 	if err != nil {
 		return nil, err
 	}
 
 	if v.strategy == nil {
+		l.Debug("no volume strategy found yet. creating new one")
 		v.strategy, err = v.newStrategy(balances, myBuys, mySells, buys, sells)
 
 		return v.strategy, err
 	}
 
 	if v.strategy.GetMinAmount().GT(*v.strategy.GetRemainingAmount()) {
+		l.Debug("strategy remaining amount is too low. creating new one")
 		v.strategy, err = v.newStrategy(balances, myBuys, mySells, buys, sells)
 
 		return v.strategy, err
 	}
 
-	if v.strategy.GetOrderType() == tradebinTypes.OrderTypeBuy && len(buys) == 0 {
+	if v.strategy.GetOrderType() == tradebinTypes.OrderTypeBuy && len(sells) == 0 {
+		l.Debug("can not use strategy due to missing buy orders. creating new one")
 		v.strategy, err = v.newStrategy(balances, myBuys, mySells, buys, sells)
 
 		return v.strategy, err
 	}
 
-	if v.strategy.GetOrderType() == tradebinTypes.OrderTypeSell && len(sells) == 0 {
+	if v.strategy.GetOrderType() == tradebinTypes.OrderTypeSell && len(buys) == 0 {
+		l.Debug("can not use strategy due to missing sell orders. creating new one")
 		v.strategy, err = v.newStrategy(balances, myBuys, mySells, buys, sells)
 
 		return v.strategy, err
