@@ -82,12 +82,16 @@ func (v *Volume) Validate() error {
 		return NewConfigError("min is required")
 	}
 
-	if v.Max <= 0 {
+	if v.Max < 0 {
 		return NewConfigError("max is required")
 	}
 
 	if v.TradeInterval < 30 {
 		return NewConfigError("trade_interval is required to be higher than 30 or equal")
+	}
+
+	if v.Min > v.Max {
+		return NewConfigError("min volume is greater than max volume ")
 	}
 
 	return nil

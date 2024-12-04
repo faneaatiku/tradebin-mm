@@ -80,6 +80,10 @@ func NewVolumeMaker(
 
 func (v *Volume) MakeVolume() error {
 	l := v.l.WithField("func", "MakeVolume")
+	if v.cfg.GetMax() == 0 {
+		l.Info("volume maker is stopped due to volume max setting set to 0 or below")
+	}
+
 	v.locker.Lock(volumeLock)
 	defer v.locker.Unlock(volumeLock)
 	l.Debugf("lock [%s] acquired", volumeLock)
