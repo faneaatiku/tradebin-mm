@@ -107,14 +107,19 @@ func (v *Orders) FillOrderBook() error {
 	}
 
 	bBuy, sSell := v.getSpread(buys, sells)
-	startPrice := v.getStartPrice(v.marketConfig.GetMarketId(), bBuy, sSell)
+	toTruncate := v.getStartPrice(v.marketConfig.GetMarketId(), bBuy, sSell)
+	step := v.ordersConfig.GetPriceStepDec()
+
+	startPrice, err := internal.TruncateToStep(toTruncate, step)
+	if err != nil {
+		return fmt.Errorf("failed to truncate start price to step: %v", err)
+	}
 
 	err = v.fillOrders(sells, startPrice, tradebinTypes.OrderTypeSell, v.ordersConfig.GetSellNo(), v.buildPricesMap(mySells))
 	if err != nil {
 		return fmt.Errorf("failed to fill sell orders: %v", err)
 	}
 
-	step := v.ordersConfig.GetPriceStepDec()
 	buyStartPrice := startPrice.Sub(*step)
 	err = v.fillOrders(buys, &buyStartPrice, tradebinTypes.OrderTypeBuy, v.ordersConfig.GetBuyNo(), v.buildPricesMap(myBuys))
 	if err != nil {
@@ -225,7 +230,7 @@ func (v *Orders) getStartPrice(marketId string, biggestBuy *types.Dec, smallestS
 	}
 
 	histPrice := types.MustNewDecFromStr(history.Price)
-	if !histPrice.IsPositive() {
+	if !histPrice.IsPositive() || histPrice.GT(*smallestSell) || histPrice.LT(*biggestBuy) {
 
 		return v.getStartPriceFromSpread(biggestBuy, smallestSell)
 	}

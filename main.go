@@ -7,7 +7,6 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
-	"time"
 	"tradebin-mm/app"
 	"tradebin-mm/app/cache"
 	"tradebin-mm/app/client"
@@ -171,9 +170,6 @@ func startMarketMaking(cfg *config.Config, l logrus.FieldLogger) {
 
 	go a.Start()
 	<-done
-
-	fmt.Print("program finished. closing in 2 seconds")
-	time.Sleep(2 * time.Second)
 
 	fmt.Print("program closed")
 	os.Exit(0)
