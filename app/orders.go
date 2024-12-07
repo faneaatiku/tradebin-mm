@@ -108,12 +108,14 @@ func (v *Orders) FillOrderBook() error {
 
 	bBuy, sSell := v.getSpread(buys, sells)
 	toTruncate := v.getStartPrice(v.marketConfig.GetMarketId(), bBuy, sSell)
+	v.l.WithField("start_price_raw", toTruncate).Debug("found start price")
 	step := v.ordersConfig.GetPriceStepDec()
 
 	startPrice, err := internal.TruncateToStep(toTruncate, step)
 	if err != nil {
 		return fmt.Errorf("failed to truncate start price to step: %v", err)
 	}
+	v.l.WithField("start_price", startPrice).Debug("start price truncated")
 
 	err = v.fillOrders(sells, startPrice, tradebinTypes.OrderTypeSell, v.ordersConfig.GetSellNo(), v.buildPricesMap(mySells))
 	if err != nil {

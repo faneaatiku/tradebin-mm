@@ -21,7 +21,6 @@ func TrimAmountTrailingZeros(amount string) string {
 }
 
 func TruncateToStep(num, step *sdk.Dec) (*sdk.Dec, error) {
-	numberFloat := num.MustFloat64()
 	stepFloat := step.MustFloat64()
 
 	stepStr := fmt.Sprintf("%f", stepFloat)
@@ -31,16 +30,8 @@ func TruncateToStep(num, step *sdk.Dec) (*sdk.Dec, error) {
 	factor := math.Pow(10, float64(stepDecimals))
 
 	// Truncate the numberFloat
-	truncated := math.Trunc(numberFloat*factor) / factor
+	truncated := num.MulInt64(int64(factor)).TruncateDec().QuoInt64(int64(factor))
+	//truncated := math.Trunc(numberFloat*factor) / factor
 
-	// Format the truncated numberFloat back to a string with the desired precision
-	format := fmt.Sprintf("%%.%df", stepDecimals)
-	resultStr := fmt.Sprintf(format, truncated)
-
-	result, err := sdk.NewDecFromStr(resultStr)
-	if err != nil {
-		return nil, err
-	}
-
-	return &result, nil
+	return &truncated, nil
 }
