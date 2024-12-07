@@ -176,7 +176,9 @@ func (v *Volume) makeOrder(strategy volumeStrategy, bookOrder *tradebinTypes.Agg
 	msgs = []*tradebinTypes.MsgCreateOrder{}
 	extraAmount := sdk.ZeroInt()
 	var extraMsg *tradebinTypes.MsgCreateOrder
-	if strategy.GetExtraMaxVolume().IsPositive() && strategy.GetTradesCount()%v.cfg.GetExtraEvery() == 0 {
+	if strategy.GetExtraMaxVolume().IsPositive() &&
+		strategy.GetTradesCount()%v.cfg.GetExtraEvery() == 0 &&
+		strategy.GetTradesCount() > 0 {
 		l.Debug("extra volume is required. adding a new order to fill immediately")
 		extraAmount = internal.MustRandomInt(strategy.GetExtraMinVolume(), strategy.GetExtraMaxVolume())
 		if extraAmount.IsPositive() {
@@ -396,6 +398,11 @@ func (v *Volume) makeBaseStrategy(orderType string, myOrders []tradebinTypes.Ord
 	extraMin := sdk.NewInt(v.cfg.GetExtraMin())
 	extraMax := sdk.NewInt(v.cfg.GetExtraMax())
 
+	var tradesCount int64
+	if v.strategy != nil {
+		tradesCount = v.strategy.GetTradesCount()
+	}
+
 	return &dto.VolumeStrategy{
 		MinVolume:       &minVolume,
 		MaxVolume:       &maxVolume,
@@ -404,5 +411,6 @@ func (v *Volume) makeBaseStrategy(orderType string, myOrders []tradebinTypes.Ord
 		LastRun:         &time.Time{},
 		ExtraMinVolume:  &extraMin,
 		ExtraMaxVolume:  &extraMax,
+		TradesCount:     tradesCount,
 	}
 }
