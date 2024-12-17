@@ -5,6 +5,13 @@ import (
 	"time"
 )
 
+const (
+	CarouselType = "carousel"
+	SpreadType   = "spread"
+
+	defaultType = CarouselType
+)
+
 type VolumeStrategy struct {
 	MinVolume       *sdk.Int
 	MaxVolume       *sdk.Int
@@ -14,6 +21,7 @@ type VolumeStrategy struct {
 	ExtraMinVolume  *sdk.Int
 	ExtraMaxVolume  *sdk.Int
 	TradesCount     int64
+	Type            string
 }
 
 func (v *VolumeStrategy) IncrementTradesCount() {
@@ -62,4 +70,16 @@ func (v *VolumeStrategy) GetExtraMinVolume() *sdk.Int {
 
 func (v *VolumeStrategy) GetExtraMaxVolume() *sdk.Int {
 	return v.ExtraMaxVolume
+}
+
+func (v *VolumeStrategy) GetType() string {
+	if v.Type == "" {
+		return defaultType
+	}
+
+	if v.Type != CarouselType && v.Type != SpreadType {
+		return defaultType
+	}
+
+	return v.Type
 }

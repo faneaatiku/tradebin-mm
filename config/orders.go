@@ -14,12 +14,13 @@ var (
 )
 
 type Orders struct {
-	Buy        int    `yaml:"buy_no"`
-	Sell       int    `yaml:"sell_no"`
-	Step       string `yaml:"step"`
-	StartPrice string `yaml:"start_price"`
-	MinAmount  int64  `yaml:"min_amount"`
-	MaxAmount  int64  `yaml:"max_amount"`
+	Buy         int    `yaml:"buy_no"`
+	Sell        int    `yaml:"sell_no"`
+	Step        string `yaml:"step"`
+	SpreadSteps int64  `yaml:"spread_steps"`
+	StartPrice  string `yaml:"start_price"`
+	MinAmount   int64  `yaml:"min_amount"`
+	MaxAmount   int64  `yaml:"max_amount"`
 }
 
 func (o *Orders) Validate() error {
@@ -94,6 +95,12 @@ func (o *Orders) GetOrderMinAmount() *types.Int {
 
 func (o *Orders) GetOrderMaxAmount() *types.Int {
 	num := types.NewInt(o.MaxAmount)
+
+	return &num
+}
+
+func (o *Orders) GetSpreadSteps() *types.Int {
+	num := types.NewInt(o.SpreadSteps)
 
 	return &num
 }

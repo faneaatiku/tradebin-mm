@@ -41,6 +41,7 @@ type ordersConfig interface {
 	GetPriceStepDec() *types.Dec
 	GetOrderMinAmount() *types.Int
 	GetOrderMaxAmount() *types.Int
+	GetSpreadSteps() *types.Int
 }
 
 type Orders struct {
@@ -154,10 +155,22 @@ func (v *Orders) fillOrders(existingOrders []tradebinTypes.AggregatedOrder, star
 	minAmount := v.ordersConfig.GetOrderMinAmount()
 	maxAmount := v.ordersConfig.GetOrderMaxAmount()
 	newStartPrice := *startPrice
+	//leave configured spread empty
+	if v.ordersConfig.GetSpreadSteps().IsPositive() {
+		//divide the total spread steps required to be empty in two (half for sells/half for buys)
+		sideSpreadSteps := v.ordersConfig.GetSpreadSteps().QuoRaw(2)
+		spreadTotal := v.ordersConfig.GetPriceStepDec().MulInt(sideSpreadSteps)
+		if orderType == tradebinTypes.OrderTypeBuy {
+			newStartPrice = newStartPrice.Sub(spreadTotal)
+		} else {
+			newStartPrice = newStartPrice.Add(spreadTotal)
+		}
+	}
+
 	var newOrdersMsgs []*tradebinTypes.MsgCreateOrder
 	l.Info("not enough existing orders to fill the needed number of orders")
 	for neededOrders > 0 {
-		//excluded prices ar the prices we already have an order for
+		//excluded prices are the prices we already have an order for
 		if _, ok := excludedPrices[internal.TrimAmountTrailingZeros(newStartPrice.String())]; ok {
 			if orderType == tradebinTypes.OrderTypeBuy {
 				newStartPrice = newStartPrice.Sub(*v.ordersConfig.GetPriceStepDec())
@@ -221,6 +234,11 @@ func (v *Orders) fillOrders(existingOrders []tradebinTypes.AggregatedOrder, star
 }
 
 func (v *Orders) getStartPrice(marketId string, biggestBuy *types.Dec, smallestSell *types.Dec) *types.Dec {
+	if v.ordersConfig.GetSpreadSteps().IsPositive() {
+		//if the config requires an empty spread we take the price from the spread
+		return v.getStartPriceFromSpread(biggestBuy, smallestSell)
+	}
+
 	history, err := v.ordersProvider.GetLastMarketOrder(marketId)
 	if history == nil {
 		//in this case fallback on taking the price from the spread

@@ -17,6 +17,10 @@ const (
 	volumeMul = 5
 )
 
+type volumeOrderConfig interface {
+	GetPriceStepDec() *sdk.Dec
+}
+
 type volumeConfig interface {
 	GetMin() int64
 	GetMax() int64
@@ -24,6 +28,7 @@ type volumeConfig interface {
 	GetExtraMin() int64
 	GetExtraMax() int64
 	GetExtraEvery() int64
+	GetStrategy() string
 }
 
 type volumeStrategy interface {
@@ -38,6 +43,7 @@ type volumeStrategy interface {
 	GetExtraMaxVolume() *sdk.Int
 	IncrementTradesCount()
 	GetTradesCount() int64
+	GetType() string
 }
 
 type locker interface {
@@ -47,6 +53,7 @@ type locker interface {
 
 type Volume struct {
 	cfg          volumeConfig
+	orderConfig  volumeOrderConfig
 	marketConfig data_provider.MarketProvider
 
 	strategy        volumeStrategy
@@ -68,9 +75,10 @@ func NewVolumeMaker(
 	ordersProvider ordersProvider,
 	orderSubmitter orderSubmitter,
 	locker locker,
+	orderConfig volumeOrderConfig,
 ) (*Volume, error) {
-	if cfg == nil || marketConfig == nil || balanceProvider == nil || addressProvider == nil || ordersProvider == nil || orderSubmitter == nil || l == nil || locker == nil {
-		return nil, internal.NewInvalidDependenciesErr("NewOrdersFiller")
+	if cfg == nil || marketConfig == nil || balanceProvider == nil || addressProvider == nil || ordersProvider == nil || orderSubmitter == nil || l == nil || locker == nil || orderConfig == nil {
+		return nil, internal.NewInvalidDependenciesErr("NewVolumeMaker")
 	}
 
 	return &Volume{
@@ -82,6 +90,7 @@ func NewVolumeMaker(
 		orderSubmitter:  orderSubmitter,
 		l:               l,
 		locker:          locker,
+		orderConfig:     orderConfig,
 	}, nil
 }
 
@@ -135,15 +144,11 @@ func (v *Volume) MakeVolume() error {
 		}
 	}
 
-	var bookOrder tradebinTypes.AggregatedOrder
-	if strategy.GetOrderType() == tradebinTypes.OrderTypeBuy {
-		bookOrder = sells[0]
-	} else {
-		bookOrder = buys[0]
+	order, orderAmount, msgs := v.makeOrder(strategy, buys, sells)
+	if order == nil || !orderAmount.IsPositive() || len(msgs) == 0 {
+		return nil
 	}
-	l.WithField("book_order", bookOrder).Debugf("will fill order of type %s", bookOrder.OrderType)
 
-	order, orderAmount, msgs := v.makeOrder(strategy, &bookOrder)
 	l.WithField("order_msg", order).Info("order message created")
 
 	err = v.orderSubmitter.AddOrders(msgs)
@@ -171,8 +176,23 @@ func (v *Volume) ackOrder(orderAmount sdk.Int) {
 	v.strategy.IncrementTradesCount()
 }
 
-func (v *Volume) makeOrder(strategy volumeStrategy, bookOrder *tradebinTypes.AggregatedOrder) (msg *tradebinTypes.MsgCreateOrder, orderAmount sdk.Int, msgs []*tradebinTypes.MsgCreateOrder) {
-	l := v.l.WithField("func", "makeOrder")
+func (v *Volume) makeOrder(strategy volumeStrategy, buys, sells []tradebinTypes.AggregatedOrder) (msg *tradebinTypes.MsgCreateOrder, orderAmount sdk.Int, msgs []*tradebinTypes.MsgCreateOrder) {
+	var bookOrder tradebinTypes.AggregatedOrder
+	if strategy.GetOrderType() == tradebinTypes.OrderTypeBuy {
+		bookOrder = sells[0]
+	} else {
+		bookOrder = buys[0]
+	}
+
+	if v.isCarouselStrategy(strategy.GetType()) {
+		return v.makeCarouselOrder(strategy, &bookOrder)
+	}
+
+	return v.makeSpreadOrder(strategy, buys, sells)
+}
+
+func (v *Volume) makeCarouselOrder(strategy volumeStrategy, bookOrder *tradebinTypes.AggregatedOrder) (msg *tradebinTypes.MsgCreateOrder, orderAmount sdk.Int, msgs []*tradebinTypes.MsgCreateOrder) {
+	l := v.l.WithField("func", "makeCarouselOrder")
 	msgs = []*tradebinTypes.MsgCreateOrder{}
 	extraAmount := sdk.ZeroInt()
 	var extraMsg *tradebinTypes.MsgCreateOrder
@@ -221,6 +241,68 @@ func (v *Volume) makeOrder(strategy volumeStrategy, bookOrder *tradebinTypes.Agg
 	return msg, orderAmount, msgs
 }
 
+func (v *Volume) makeSpreadOrder(strategy volumeStrategy, buys, sells []tradebinTypes.AggregatedOrder) (msg *tradebinTypes.MsgCreateOrder, orderAmount sdk.Int, msgs []*tradebinTypes.MsgCreateOrder) {
+	l := v.l.WithField("func", "makeSpreadOrder")
+	bookBuyPrice := sdk.MustNewDecFromStr(buys[0].Price)
+	bookSellPrice := sdk.MustNewDecFromStr(sells[0].Price)
+
+	var priceDec sdk.Dec
+	if strategy.GetOrderType() == tradebinTypes.OrderTypeBuy {
+		priceDec = bookSellPrice.Sub(*v.orderConfig.GetPriceStepDec())
+	} else {
+		priceDec = bookBuyPrice.Add(*v.orderConfig.GetPriceStepDec())
+	}
+
+	if !priceDec.IsPositive() || priceDec.LT(bookBuyPrice) || priceDec.GT(bookSellPrice) {
+		l.
+			WithField("priceDec", priceDec.String()).
+			WithField("bookBuyPrice", bookBuyPrice.String()).
+			WithField("bookSellPrice", bookSellPrice.String()).
+			Errorf("resulted price for spread order not possible")
+
+		return
+	}
+
+	price := priceDec.String()
+
+	msgs = []*tradebinTypes.MsgCreateOrder{}
+	extraAmount := sdk.ZeroInt()
+	if strategy.GetExtraMaxVolume().IsPositive() &&
+		strategy.GetTradesCount()%v.cfg.GetExtraEvery() == 0 &&
+		strategy.GetTradesCount() > 0 {
+		l.Debug("extra volume is required. adding a new order to fill immediately")
+		extraAmount = internal.MustRandomInt(strategy.GetExtraMinVolume(), strategy.GetExtraMaxVolume())
+	}
+
+	orderAmount = internal.MustRandomInt(strategy.GetMinAmount(), strategy.GetMaxAmount())
+	if orderAmount.GT(*strategy.GetRemainingAmount()) {
+		l.Debug("order amount is greater than remaining amount")
+		orderAmount = *strategy.GetRemainingAmount()
+	}
+
+	msg = tradebinTypes.NewMsgCreateOrder(
+		v.addressProvider.GetAddress().String(),
+		strategy.GetOrderType(),
+		orderAmount.Add(extraAmount).String(),
+		price,
+		v.marketConfig.GetMarketId(),
+	)
+
+	msgs = append(msgs, msg)
+
+	secondMsg := tradebinTypes.NewMsgCreateOrder(
+		v.addressProvider.GetAddress().String(),
+		tradebinTypes.TheOtherOrderType(strategy.GetOrderType()),
+		orderAmount.Add(extraAmount).String(),
+		price,
+		v.marketConfig.GetMarketId(),
+	)
+
+	msgs = append(msgs, secondMsg)
+
+	return msg, orderAmount, msgs
+}
+
 // getStrategy returns the appropriate volumeStrategy to use on the next trade
 // If the strategy does not exist it creates a new one
 // If orders needed for this strategy are missing from the order book it creates a new one
@@ -244,6 +326,13 @@ func (v *Volume) getStrategy(balances *dto.MarketBalance, buys, sells []tradebin
 		v.strategy, err = v.newStrategy(balances, myBuys, mySells, buys, sells)
 
 		return v.strategy, err
+	}
+
+	if !v.isCarouselStrategy(v.cfg.GetStrategy()) {
+		//for spread strategy we can trade no matter who owns the sell/buy book order
+		//because spread strategy buys and sells from its own orders within the spread
+
+		return v.strategy, nil
 	}
 
 	if v.strategy.GetOrderType() == tradebinTypes.OrderTypeBuy {
@@ -309,27 +398,31 @@ func (v *Volume) makeStrategy(marketBalance *dto.MarketBalance, myBuys, mySells 
 		return v.makeBaseStrategy(tradebinTypes.OrderTypeSell, myBuys, buys)
 	}
 
-	//it's safe to assume both sells and buys are not empty slices because of canBuy/canSell mentioned above
-	ownsFirstSell := v.isMyOrder(mySells, sells[0])
-	ownsFirstBuy := v.isMyOrder(myBuys, buys[0])
-	if !ownsFirstSell && ownsFirstBuy {
-		//if we own only the buy use a sell strategy in order to sell to us
+	if v.isCarouselStrategy(v.cfg.GetStrategy()) {
+		//only carousel strategy buys/sells to self orders, otherwise we trade in spread and do not care who's order it is
 
-		return v.makeBaseStrategy(tradebinTypes.OrderTypeSell, myBuys, buys)
-	} else if ownsFirstSell && !ownsFirstBuy {
-		//if we own only the first sell use a buy strategy in order to buy from us
+		//it's safe to assume both sells and buys are not empty slices because of canBuy/canSell mentioned above
+		ownsFirstSell := v.isMyOrder(mySells, sells[0])
+		ownsFirstBuy := v.isMyOrder(myBuys, buys[0])
+		if !ownsFirstSell && ownsFirstBuy {
+			//if we own only the buy use a sell strategy in order to sell to us
 
-		return v.makeBaseStrategy(tradebinTypes.OrderTypeBuy, mySells, sells)
-	} else if !ownsFirstSell {
-		//if we don't own any of the buy/sells in the order book then fill the one with the lowest amount
-		sellAmt, _ := sdk.NewIntFromString(sells[0].Amount)
-		buyAmt, _ := sdk.NewIntFromString(buys[0].Amount)
-		if sellAmt.LT(buyAmt) {
+			return v.makeBaseStrategy(tradebinTypes.OrderTypeSell, myBuys, buys)
+		} else if ownsFirstSell && !ownsFirstBuy {
+			//if we own only the first sell use a buy strategy in order to buy from us
 
 			return v.makeBaseStrategy(tradebinTypes.OrderTypeBuy, mySells, sells)
-		}
+		} else if !ownsFirstSell {
+			//if we don't own any of the buy/sells in the order book then fill the one with the lowest amount
+			sellAmt, _ := sdk.NewIntFromString(sells[0].Amount)
+			buyAmt, _ := sdk.NewIntFromString(buys[0].Amount)
+			if sellAmt.LT(buyAmt) {
 
-		return v.makeBaseStrategy(tradebinTypes.OrderTypeSell, myBuys, buys)
+				return v.makeBaseStrategy(tradebinTypes.OrderTypeBuy, mySells, sells)
+			}
+
+			return v.makeBaseStrategy(tradebinTypes.OrderTypeSell, myBuys, buys)
+		}
 	}
 
 	l.Debug("can sell and buy.")
@@ -412,5 +505,10 @@ func (v *Volume) makeBaseStrategy(orderType string, myOrders []tradebinTypes.Ord
 		ExtraMinVolume:  &extraMin,
 		ExtraMaxVolume:  &extraMax,
 		TradesCount:     tradesCount,
+		Type:            v.cfg.GetStrategy(),
 	}
+}
+
+func (v *Volume) isCarouselStrategy(strategyType string) bool {
+	return strategyType == dto.CarouselType
 }

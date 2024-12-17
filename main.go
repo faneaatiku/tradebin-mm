@@ -141,6 +141,7 @@ func startMarketMaking(cfg *config.Config, l logrus.FieldLogger) {
 		orderData,
 		oService,
 		lock.GetInMemoryLocker(),
+		&cfg.Orders,
 	)
 	if err != nil {
 		log.Fatalf("could not create volume maker: %v", err)

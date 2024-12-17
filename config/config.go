@@ -67,6 +67,7 @@ type Volume struct {
 	ExtraMin      float64 `yaml:"extra_min"`
 	ExtraMax      float64 `yaml:"extra_max"`
 	ExtraEvery    int64   `yaml:"extra_every"`
+	Strategy      string  `yaml:"strategy"`
 }
 
 func (v *Volume) GetMin() int64 {
@@ -92,6 +93,8 @@ func (v *Volume) GetExtraMax() int64 {
 func (v *Volume) GetExtraEvery() int64 {
 	return v.ExtraEvery
 }
+
+func (v *Volume) GetStrategy() string { return v.Strategy }
 
 func (v *Volume) Validate() error {
 	if v.Min <= 0 {
