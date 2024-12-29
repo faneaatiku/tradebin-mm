@@ -21,6 +21,7 @@ type Orders struct {
 	StartPrice  string `yaml:"start_price"`
 	MinAmount   int64  `yaml:"min_amount"`
 	MaxAmount   int64  `yaml:"max_amount"`
+	HoldBack    int    `yaml:"hold_back_interval"`
 }
 
 func (o *Orders) Validate() error {
@@ -103,4 +104,8 @@ func (o *Orders) GetSpreadSteps() *types.Int {
 	num := types.NewInt(o.SpreadSteps)
 
 	return &num
+}
+
+func (o *Orders) GetHoldBackSeconds() int {
+	return o.HoldBack
 }

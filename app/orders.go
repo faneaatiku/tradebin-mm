@@ -5,6 +5,7 @@ import (
 	tradebinTypes "github.com/bze-alphateam/bze/x/tradebin/types"
 	"github.com/cosmos/cosmos-sdk/types"
 	"github.com/sirupsen/logrus"
+	"time"
 	"tradebin-mm/app/data_provider"
 	"tradebin-mm/app/dto"
 	"tradebin-mm/app/internal"
@@ -42,6 +43,7 @@ type ordersConfig interface {
 	GetOrderMinAmount() *types.Int
 	GetOrderMaxAmount() *types.Int
 	GetSpreadSteps() *types.Int
+	GetHoldBackSeconds() int
 }
 
 type Orders struct {
@@ -100,6 +102,12 @@ func (v *Orders) FillOrderBook() error {
 		if err != nil {
 			v.l.WithError(err).Errorf("failed to cancel extra orders")
 		}
+	}
+
+	if !v.shouldFillOrderBook(balances.MarketId) {
+		v.l.Info("should not fill order book yet. hold back.")
+
+		return nil
 	}
 
 	buys, sells, err := v.ordersProvider.GetActiveOrders(balances)
@@ -345,4 +353,23 @@ func (v *Orders) getSpread(buys, sells []tradebinTypes.AggregatedOrder) (biggest
 	}
 
 	return &b, &s
+}
+
+func (v *Orders) shouldFillOrderBook(marketId string) bool {
+	l := v.l.WithField("method", "shouldFillOrderBook")
+	history, err := v.ordersProvider.GetLastMarketOrder(marketId)
+	if err != nil {
+		l.WithError(err).Error("failed to get last order for market")
+		return false
+	}
+
+	if history == nil {
+		return true
+	}
+
+	if history.Maker == v.addressProvider.GetAddress().String() && history.Taker == v.addressProvider.GetAddress().String() {
+		return true
+	}
+
+	return time.Now().Unix()-history.ExecutedAt > int64(v.ordersConfig.GetHoldBackSeconds())
 }
