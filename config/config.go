@@ -68,6 +68,7 @@ type Volume struct {
 	ExtraMax      float64 `yaml:"extra_max"`
 	ExtraEvery    int64   `yaml:"extra_every"`
 	Strategy      string  `yaml:"strategy"`
+	HoldBack      int     `yaml:"hold_back_interval"`
 }
 
 func (v *Volume) GetMin() int64 {
@@ -96,6 +97,10 @@ func (v *Volume) GetExtraEvery() int64 {
 
 func (v *Volume) GetStrategy() string { return v.Strategy }
 
+func (v *Volume) GetHoldBackSeconds() int {
+	return v.HoldBack
+}
+
 func (v *Volume) Validate() error {
 	if v.Min <= 0 {
 		return NewConfigError("min is required")
@@ -115,6 +120,10 @@ func (v *Volume) Validate() error {
 
 	if v.ExtraEvery <= 0 {
 		return NewConfigError("extra_every must be higher than 0")
+	}
+
+	if v.HoldBack <= 0 {
+		v.HoldBack = v.GetTradeInterval()
 	}
 
 	return nil

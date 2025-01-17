@@ -211,6 +211,11 @@ func (v *Orders) fillOrders(existingOrders []tradebinTypes.AggregatedOrder, star
 			}
 		}
 
+		if !startPrice.IsPositive() {
+			l.Info("reached a non positive start price. stop creating order messages")
+			break
+		}
+
 		if shouldPlace {
 			randAmount := internal.MustRandomInt(minAmount, maxAmount)
 			msg := tradebinTypes.NewMsgCreateOrder(
@@ -218,7 +223,7 @@ func (v *Orders) fillOrders(existingOrders []tradebinTypes.AggregatedOrder, star
 				orderType,
 				randAmount.String(),
 				internal.TrimAmountTrailingZeros(newStartPrice.String()),
-				existingOrders[0].MarketId,
+				v.marketConfig.GetMarketId(),
 			)
 			newOrdersMsgs = append(newOrdersMsgs, msg)
 			neededOrders--

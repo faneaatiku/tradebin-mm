@@ -29,6 +29,7 @@ type volumeConfig interface {
 	GetExtraMax() int64
 	GetExtraEvery() int64
 	GetStrategy() string
+	GetHoldBackSeconds() int
 }
 
 type volumeStrategy interface {
@@ -141,6 +142,16 @@ func (v *Volume) MakeVolume() error {
 			l.WithField("hist_date", histDate).Info("market has been active in the last minutes. Will NOT create volume")
 
 			return nil
+		}
+
+		//if a foreign address is the last trader hold back for X duration taken from config
+		if history.Maker != v.addressProvider.GetAddress().String() || history.Taker != v.addressProvider.GetAddress().String() {
+			holdBackUntil := histDate.Add(time.Duration(v.cfg.GetHoldBackSeconds()) * time.Second)
+			if holdBackUntil.After(time.Now()) {
+				l.WithField("hist_date", histDate).Infof("found foreign order holding back until: %s", holdBackUntil)
+
+				return nil
+			}
 		}
 	}
 

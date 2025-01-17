@@ -20,6 +20,7 @@ volume:
     extra_min: 2000000 # the minimum amount to extra trade for higher volume
     extra_max: 4000000 # the maximum amount to extra trade for higher volume
     extra_every: 3 # how often to add the maximum amount
+    hold_back_interval: 300 #the number of seconds to wait when other trades happen (excluding self trades), before making volume
 wallet:
     mnemonic: "your SUPER SECRET mnemonic" # the mnemonic of the wallet
 client:
