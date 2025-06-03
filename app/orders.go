@@ -134,7 +134,7 @@ func (v *Orders) FillOrderBook() error {
 	buyStartPrice := startPrice.Sub(*step)
 	err = v.fillOrders(buys, &buyStartPrice, tradebinTypes.OrderTypeBuy, v.ordersConfig.GetBuyNo(), v.buildPricesMap(myBuys))
 	if err != nil {
-		return fmt.Errorf("failed to fill sell orders: %v", err)
+		return fmt.Errorf("failed to fill buy orders: %v", err)
 	}
 
 	return nil
@@ -211,7 +211,7 @@ func (v *Orders) fillOrders(existingOrders []tradebinTypes.AggregatedOrder, star
 			}
 		}
 
-		if !startPrice.IsPositive() {
+		if !newStartPrice.IsPositive() {
 			l.Info("reached a non positive start price. stop creating order messages")
 			break
 		}
