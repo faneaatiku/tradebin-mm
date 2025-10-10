@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"github.com/sirupsen/logrus"
 	"log"
 	"os"
 	"os/signal"
@@ -15,11 +14,15 @@ import (
 	"tradebin-mm/app/service"
 	"tradebin-mm/app/wallet"
 	"tradebin-mm/config"
+
+	"github.com/cosmos/cosmos-sdk/types"
+	"github.com/sirupsen/logrus"
 )
 
 const (
 	defaultAction = "mm"
 	actionCancel  = "cancel"
+	withdrawAll   = "withdraw-all"
 )
 
 func main() {
@@ -57,7 +60,58 @@ func main() {
 		startMarketMaking(cfg, l)
 	case actionCancel:
 		cancelOrders(cfg, l)
+	case withdrawAll:
+		withdrawAllBalances(cfg, l)
 	}
+}
+
+func withdrawAllBalances(cfg *config.Config, l logrus.FieldLogger) {
+	w, err := wallet.NewWallet(cfg.Wallet.Mnemonic)
+	if err != nil {
+		log.Fatalf("could not create wallet: %v", err)
+	}
+
+	address := os.Args[3]
+	if address == "" {
+		l.Fatal("please provide address argument")
+	}
+
+	convAddr, err := types.AccAddressFromBech32(address)
+	if err != nil {
+		log.Fatalf("could not convert address: %v", err)
+	}
+
+	grpc, err := getGrpcClient(cfg.Client)
+	if err != nil {
+		log.Fatalf("could not create grpc client: %v", err)
+	}
+
+	balances, err := data_provider.NewBalanceDataProvider(l, grpc)
+	if err != nil {
+		log.Fatalf("could not create balance data provider: %v", err)
+	}
+
+	broadcaster, err := service.NewBroadcaster(l, &cfg.Transaction, w, grpc)
+	if err != nil {
+		log.Fatalf("could not create broadcaster: %v", err)
+	}
+
+	sender, err := service.NewSender(broadcaster, l)
+	if err != nil {
+		log.Fatalf("could not create sender: %v", err)
+	}
+
+	a, err := app.NewWithdrawAction(l, balances, w, sender)
+	if err != nil {
+		log.Fatalf("could not create withdraw action: %v", err)
+	}
+
+	err = a.WithdrawAll(convAddr)
+	if err != nil {
+		log.Fatalf("could not withdraw all: %v", err)
+	}
+
+	fmt.Printf("all balances withdrawn")
 }
 
 func cancelOrders(cfg *config.Config, l logrus.FieldLogger) {
