@@ -2,13 +2,15 @@ package app
 
 import (
 	"fmt"
-	tradebinTypes "github.com/bze-alphateam/bze/x/tradebin/types"
-	"github.com/cosmos/cosmos-sdk/types"
-	"github.com/sirupsen/logrus"
 	"time"
 	"tradebin-mm/app/data_provider"
 	"tradebin-mm/app/dto"
 	"tradebin-mm/app/internal"
+
+	"cosmossdk.io/math"
+	tradebinTypes "github.com/bze-alphateam/bze/x/tradebin/types"
+	"github.com/cosmos/cosmos-sdk/types"
+	"github.com/sirupsen/logrus"
 )
 
 const (
@@ -38,11 +40,11 @@ type orderSubmitter interface {
 type ordersConfig interface {
 	GetBuyNo() int
 	GetSellNo() int
-	GetStartPriceDec() *types.Dec
-	GetPriceStepDec() *types.Dec
-	GetOrderMinAmount() *types.Int
-	GetOrderMaxAmount() *types.Int
-	GetSpreadSteps() *types.Int
+	GetStartPriceDec() *math.LegacyDec
+	GetPriceStepDec() *math.LegacyDec
+	GetOrderMinAmount() *math.Int
+	GetOrderMaxAmount() *math.Int
+	GetSpreadSteps() *math.Int
 	GetHoldBackSeconds() int
 }
 
@@ -144,14 +146,14 @@ func (v *Orders) buildPricesMap(orders []tradebinTypes.Order) map[string]struct{
 	prices := make(map[string]struct{})
 	for _, order := range orders {
 		//for safety, we convert it to dec and trim trailing zeros to make sure the prices are unique
-		orderPriceDec := types.MustNewDecFromStr(order.Price)
+		orderPriceDec := math.LegacyMustNewDecFromStr(order.Price)
 		prices[internal.TrimAmountTrailingZeros(orderPriceDec.String())] = struct{}{}
 	}
 
 	return prices
 }
 
-func (v *Orders) fillOrders(existingOrders []tradebinTypes.AggregatedOrder, startPrice *types.Dec, orderType string, neededOrders int, excludedPrices map[string]struct{}) error {
+func (v *Orders) fillOrders(existingOrders []tradebinTypes.AggregatedOrder, startPrice *math.LegacyDec, orderType string, neededOrders int, excludedPrices map[string]struct{}) error {
 	l := v.l.WithField("orderType", orderType)
 
 	l.Info("start building order add messages")
@@ -196,7 +198,7 @@ func (v *Orders) fillOrders(existingOrders []tradebinTypes.AggregatedOrder, star
 				return fmt.Errorf("expected order type to be %s but encountered order of different type: %s", orderType, existing.OrderType)
 			}
 
-			existingPrice := types.MustNewDecFromStr(existing.Price)
+			existingPrice := math.LegacyMustNewDecFromStr(existing.Price)
 			if existingPrice.Equal(newStartPrice) {
 				shouldPlace = false
 				break
@@ -246,7 +248,7 @@ func (v *Orders) fillOrders(existingOrders []tradebinTypes.AggregatedOrder, star
 	return v.orderSubmitter.AddOrders(newOrdersMsgs)
 }
 
-func (v *Orders) getStartPrice(marketId string, biggestBuy *types.Dec, smallestSell *types.Dec) *types.Dec {
+func (v *Orders) getStartPrice(marketId string, biggestBuy *math.LegacyDec, smallestSell *math.LegacyDec) *math.LegacyDec {
 	if v.ordersConfig.GetSpreadSteps().IsPositive() {
 		//if the config requires an empty spread we take the price from the spread
 		return v.getStartPriceFromSpread(biggestBuy, smallestSell)
@@ -262,7 +264,7 @@ func (v *Orders) getStartPrice(marketId string, biggestBuy *types.Dec, smallestS
 		return v.getStartPriceFromSpread(biggestBuy, smallestSell)
 	}
 
-	histPrice := types.MustNewDecFromStr(history.Price)
+	histPrice := math.LegacyMustNewDecFromStr(history.Price)
 	if !histPrice.IsPositive() || histPrice.GT(*smallestSell) || histPrice.LT(*biggestBuy) {
 
 		return v.getStartPriceFromSpread(biggestBuy, smallestSell)
@@ -278,7 +280,7 @@ func (v *Orders) getStartPrice(marketId string, biggestBuy *types.Dec, smallestS
 	return &histPrice
 }
 
-func (v *Orders) getStartPriceFromSpread(biggestBuy *types.Dec, smallestSell *types.Dec) *types.Dec {
+func (v *Orders) getStartPriceFromSpread(biggestBuy *math.LegacyDec, smallestSell *math.LegacyDec) *math.LegacyDec {
 	if biggestBuy.IsZero() && smallestSell.IsZero() {
 		//start from configured price
 		return v.ordersConfig.GetStartPriceDec()
@@ -304,7 +306,7 @@ func (v *Orders) getStartPriceFromSpread(biggestBuy *types.Dec, smallestSell *ty
 	}
 
 	// calculate how many steps are between the biggest buy and the smallest sell and divide by two to find the middle
-	noOfSteps := diff.Quo(*step).Quo(types.NewDec(2)).TruncateDec()
+	noOfSteps := diff.Quo(*step).Quo(math.LegacyNewDec(2)).TruncateDec()
 	start := smallestSell.Sub(step.Mul(noOfSteps))
 
 	return &start
@@ -345,16 +347,16 @@ func (v *Orders) cancelOrders(sortedOrders []tradebinTypes.Order, limit int) err
 	return nil
 }
 
-func (v *Orders) getSpread(buys, sells []tradebinTypes.AggregatedOrder) (biggestBuy *types.Dec, smallestSell *types.Dec) {
-	b := types.ZeroDec()
-	s := types.ZeroDec()
+func (v *Orders) getSpread(buys, sells []tradebinTypes.AggregatedOrder) (biggestBuy *math.LegacyDec, smallestSell *math.LegacyDec) {
+	b := math.LegacyZeroDec()
+	s := math.LegacyZeroDec()
 
 	if len(buys) > 0 {
-		b = types.MustNewDecFromStr(buys[0].Price)
+		b = math.LegacyMustNewDecFromStr(buys[0].Price)
 	}
 
 	if len(sells) > 0 {
-		s = types.MustNewDecFromStr(sells[0].Price)
+		s = math.LegacyMustNewDecFromStr(sells[0].Price)
 	}
 
 	return &b, &s

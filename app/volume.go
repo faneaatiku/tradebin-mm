@@ -2,13 +2,15 @@ package app
 
 import (
 	"fmt"
-	tradebinTypes "github.com/bze-alphateam/bze/x/tradebin/types"
-	sdk "github.com/cosmos/cosmos-sdk/types"
-	"github.com/sirupsen/logrus"
 	"time"
 	"tradebin-mm/app/data_provider"
 	"tradebin-mm/app/dto"
 	"tradebin-mm/app/internal"
+
+	"cosmossdk.io/math"
+	tradebinTypes "github.com/bze-alphateam/bze/x/tradebin/types"
+	sdk "github.com/cosmos/cosmos-sdk/types"
+	"github.com/sirupsen/logrus"
 )
 
 const (
@@ -18,7 +20,7 @@ const (
 )
 
 type volumeOrderConfig interface {
-	GetPriceStepDec() *sdk.Dec
+	GetPriceStepDec() *math.LegacyDec
 }
 
 type volumeConfig interface {
@@ -33,15 +35,15 @@ type volumeConfig interface {
 }
 
 type volumeStrategy interface {
-	GetMinAmount() *sdk.Int
-	GetMaxAmount() *sdk.Int
-	GetRemainingAmount() *sdk.Int
-	SetRemainingAmount(amount *sdk.Int)
+	GetMinAmount() *math.Int
+	GetMaxAmount() *math.Int
+	GetRemainingAmount() *math.Int
+	SetRemainingAmount(amount *math.Int)
 	GetOrderType() string
 	LastRunAt() *time.Time
 	SetLastRunAt(*time.Time)
-	GetExtraMinVolume() *sdk.Int
-	GetExtraMaxVolume() *sdk.Int
+	GetExtraMinVolume() *math.Int
+	GetExtraMaxVolume() *math.Int
 	IncrementTradesCount()
 	GetTradesCount() int64
 	GetType() string
@@ -179,7 +181,7 @@ func (v *Volume) MakeVolume() error {
 	return nil
 }
 
-func (v *Volume) ackOrder(orderAmount sdk.Int) {
+func (v *Volume) ackOrder(orderAmount math.Int) {
 	now := time.Now()
 	v.strategy.SetLastRunAt(&now)
 	remaining := v.strategy.GetRemainingAmount().Sub(orderAmount)
@@ -187,7 +189,7 @@ func (v *Volume) ackOrder(orderAmount sdk.Int) {
 	v.strategy.IncrementTradesCount()
 }
 
-func (v *Volume) makeOrder(strategy volumeStrategy, buys, sells []tradebinTypes.AggregatedOrder) (msg *tradebinTypes.MsgCreateOrder, orderAmount sdk.Int, msgs []*tradebinTypes.MsgCreateOrder) {
+func (v *Volume) makeOrder(strategy volumeStrategy, buys, sells []tradebinTypes.AggregatedOrder) (msg *tradebinTypes.MsgCreateOrder, orderAmount math.Int, msgs []*tradebinTypes.MsgCreateOrder) {
 	var bookOrder tradebinTypes.AggregatedOrder
 	if strategy.GetOrderType() == tradebinTypes.OrderTypeBuy {
 		bookOrder = sells[0]
@@ -202,10 +204,10 @@ func (v *Volume) makeOrder(strategy volumeStrategy, buys, sells []tradebinTypes.
 	return v.makeSpreadOrder(strategy, buys, sells)
 }
 
-func (v *Volume) makeCarouselOrder(strategy volumeStrategy, bookOrder *tradebinTypes.AggregatedOrder) (msg *tradebinTypes.MsgCreateOrder, orderAmount sdk.Int, msgs []*tradebinTypes.MsgCreateOrder) {
+func (v *Volume) makeCarouselOrder(strategy volumeStrategy, bookOrder *tradebinTypes.AggregatedOrder) (msg *tradebinTypes.MsgCreateOrder, orderAmount math.Int, msgs []*tradebinTypes.MsgCreateOrder) {
 	l := v.l.WithField("func", "makeCarouselOrder")
 	msgs = []*tradebinTypes.MsgCreateOrder{}
-	extraAmount := sdk.ZeroInt()
+	extraAmount := math.ZeroInt()
 	var extraMsg *tradebinTypes.MsgCreateOrder
 	if strategy.GetExtraMaxVolume().IsPositive() &&
 		strategy.GetTradesCount()%v.cfg.GetExtraEvery() == 0 &&
@@ -232,7 +234,7 @@ func (v *Volume) makeCarouselOrder(strategy volumeStrategy, bookOrder *tradebinT
 		l.Debug("order amount is greater than remaining amount")
 		orderAmount = *strategy.GetRemainingAmount()
 	}
-	bookAmount, _ := sdk.NewIntFromString(bookOrder.Amount)
+	bookAmount, _ := math.NewIntFromString(bookOrder.Amount)
 
 	if orderAmount.GT(bookAmount) {
 		l.Debug("order amount is greater than book amount")
@@ -252,12 +254,12 @@ func (v *Volume) makeCarouselOrder(strategy volumeStrategy, bookOrder *tradebinT
 	return msg, orderAmount, msgs
 }
 
-func (v *Volume) makeSpreadOrder(strategy volumeStrategy, buys, sells []tradebinTypes.AggregatedOrder) (msg *tradebinTypes.MsgCreateOrder, orderAmount sdk.Int, msgs []*tradebinTypes.MsgCreateOrder) {
+func (v *Volume) makeSpreadOrder(strategy volumeStrategy, buys, sells []tradebinTypes.AggregatedOrder) (msg *tradebinTypes.MsgCreateOrder, orderAmount math.Int, msgs []*tradebinTypes.MsgCreateOrder) {
 	l := v.l.WithField("func", "makeSpreadOrder")
-	bookBuyPrice := sdk.MustNewDecFromStr(buys[0].Price)
-	bookSellPrice := sdk.MustNewDecFromStr(sells[0].Price)
+	bookBuyPrice := math.LegacyMustNewDecFromStr(buys[0].Price)
+	bookSellPrice := math.LegacyMustNewDecFromStr(sells[0].Price)
 
-	var priceDec sdk.Dec
+	var priceDec math.LegacyDec
 	if strategy.GetOrderType() == tradebinTypes.OrderTypeBuy {
 		priceDec = bookSellPrice.Sub(*v.orderConfig.GetPriceStepDec())
 	} else {
@@ -277,7 +279,7 @@ func (v *Volume) makeSpreadOrder(strategy volumeStrategy, buys, sells []tradebin
 	price := priceDec.String()
 
 	msgs = []*tradebinTypes.MsgCreateOrder{}
-	extraAmount := sdk.ZeroInt()
+	extraAmount := math.ZeroInt()
 	if strategy.GetExtraMaxVolume().IsPositive() &&
 		strategy.GetTradesCount()%v.cfg.GetExtraEvery() == 0 &&
 		strategy.GetTradesCount() > 0 {
@@ -425,8 +427,8 @@ func (v *Volume) makeStrategy(marketBalance *dto.MarketBalance, myBuys, mySells 
 			return v.makeBaseStrategy(tradebinTypes.OrderTypeBuy, mySells, sells)
 		} else if !ownsFirstSell {
 			//if we don't own any of the buy/sells in the order book then fill the one with the lowest amount
-			sellAmt, _ := sdk.NewIntFromString(sells[0].Amount)
-			buyAmt, _ := sdk.NewIntFromString(buys[0].Amount)
+			sellAmt, _ := math.NewIntFromString(sells[0].Amount)
+			buyAmt, _ := math.NewIntFromString(buys[0].Amount)
 			if sellAmt.LT(buyAmt) {
 
 				return v.makeBaseStrategy(tradebinTypes.OrderTypeBuy, mySells, sells)
@@ -492,15 +494,15 @@ func (v *Volume) makeBaseStrategy(orderType string, myOrders []tradebinTypes.Ord
 		return nil
 	}
 
-	minVolume := sdk.NewInt(v.cfg.GetMin())
-	maxVolume := sdk.NewInt(v.cfg.GetMax())
+	minVolume := math.NewInt(v.cfg.GetMin())
+	maxVolume := math.NewInt(v.cfg.GetMax())
 
 	remainingMin := minVolume.MulRaw(volumeMul)
 	remainingMax := maxVolume.MulRaw(volumeMul)
 	remaining := internal.MustRandomInt(&remainingMin, &remainingMax)
 
-	extraMin := sdk.NewInt(v.cfg.GetExtraMin())
-	extraMax := sdk.NewInt(v.cfg.GetExtraMax())
+	extraMin := math.NewInt(v.cfg.GetExtraMin())
+	extraMax := math.NewInt(v.cfg.GetExtraMax())
 
 	var tradesCount int64
 	if v.strategy != nil {

@@ -2,9 +2,10 @@ package internal
 
 import (
 	"fmt"
-	sdk "github.com/cosmos/cosmos-sdk/types"
 	"math"
 	"strings"
+
+	sdkMath "cosmossdk.io/math"
 )
 
 func TrimAmountTrailingZeros(amount string) string {
@@ -20,7 +21,7 @@ func TrimAmountTrailingZeros(amount string) string {
 	return result
 }
 
-func TruncateToStep(num, step *sdk.Dec) (*sdk.Dec, error) {
+func TruncateToStep(num, step *sdkMath.LegacyDec) (*sdkMath.LegacyDec, error) {
 	stepFloat := step.MustFloat64()
 
 	stepStr := fmt.Sprintf("%f", stepFloat)

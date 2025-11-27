@@ -5,6 +5,7 @@ import (
 	"tradebin-mm/app/internal"
 
 	basev1beta1 "cosmossdk.io/api/cosmos/base/v1beta1"
+	"cosmossdk.io/math"
 	sdk "github.com/cosmos/cosmos-sdk/types"
 	"github.com/sirupsen/logrus"
 )
@@ -54,7 +55,7 @@ func (w *Withdraw) WithdrawAll(destAddr sdk.AccAddress) error {
 
 	coins := sdk.NewCoins()
 	for _, b := range balance {
-		amtInt, _ := sdk.NewIntFromString(b.Amount)
+		amtInt, _ := math.NewIntFromString(b.Amount)
 		if amtInt.IsZero() {
 			continue
 		}

@@ -2,13 +2,15 @@ package data_provider
 
 import (
 	"context"
-	bankv1beta1 "cosmossdk.io/api/cosmos/bank/v1beta1"
-	basev1beta1 "cosmossdk.io/api/cosmos/base/v1beta1"
 	"fmt"
-	"github.com/cosmos/cosmos-sdk/types"
-	"github.com/sirupsen/logrus"
 	"tradebin-mm/app/dto"
 	"tradebin-mm/app/internal"
+
+	bankv1beta1 "cosmossdk.io/api/cosmos/bank/v1beta1"
+	basev1beta1 "cosmossdk.io/api/cosmos/base/v1beta1"
+	"cosmossdk.io/math"
+	"github.com/cosmos/cosmos-sdk/types"
+	"github.com/sirupsen/logrus"
 )
 
 type MarketProvider interface {
@@ -51,7 +53,7 @@ func (b *Balance) GetAddressBalancesForMarket(address string, marketCfg MarketPr
 	var quote types.Coin
 	for _, coin := range qc {
 		if coin.Denom == marketCfg.GetBaseDenom() {
-			baseInt, ok := types.NewIntFromString(coin.Amount)
+			baseInt, ok := math.NewIntFromString(coin.Amount)
 			if !ok {
 				return nil, fmt.Errorf("failed to parse base amount: %s for denom: %s", coin.Amount, coin.Denom)
 			}
@@ -59,7 +61,7 @@ func (b *Balance) GetAddressBalancesForMarket(address string, marketCfg MarketPr
 			m.BaseBalance = &base
 		}
 		if coin.Denom == marketCfg.GetQuoteDenom() {
-			quoteInt, ok := types.NewIntFromString(coin.Amount)
+			quoteInt, ok := math.NewIntFromString(coin.Amount)
 			if !ok {
 				return nil, fmt.Errorf("failed to parse quote amount: %s for denom: %s", coin.Amount, coin.Denom)
 			}

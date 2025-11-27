@@ -2,10 +2,11 @@ package data_provider
 
 import (
 	"context"
+	"tradebin-mm/app/internal"
+
 	tradebinTypes "github.com/bze-alphateam/bze/x/tradebin/types"
 	"github.com/cosmos/cosmos-sdk/types/query"
 	"github.com/sirupsen/logrus"
-	"tradebin-mm/app/internal"
 )
 
 type clientProvider interface {
@@ -38,7 +39,7 @@ func (m *Market) GetAllMarkets() ([]tradebinTypes.Market, error) {
 	params := m.getMarketsParams()
 	m.logger.Debug("fetching markets from blockchain")
 
-	res, err := qc.MarketAll(context.Background(), params)
+	res, err := qc.AllMarkets(context.Background(), params)
 	if err != nil {
 		return nil, err
 	}
@@ -47,8 +48,8 @@ func (m *Market) GetAllMarkets() ([]tradebinTypes.Market, error) {
 	return res.GetMarket(), nil
 }
 
-func (m *Market) getMarketsParams() *tradebinTypes.QueryAllMarketRequest {
-	return &tradebinTypes.QueryAllMarketRequest{
+func (m *Market) getMarketsParams() *tradebinTypes.QueryAllMarketsRequest {
+	return &tradebinTypes.QueryAllMarketsRequest{
 		Pagination: &query.PageRequest{
 			Limit: 10000,
 		},

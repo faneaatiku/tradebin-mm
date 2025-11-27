@@ -1,8 +1,9 @@
 package dto
 
 import (
-	sdk "github.com/cosmos/cosmos-sdk/types"
 	"time"
+
+	"cosmossdk.io/math"
 )
 
 const (
@@ -13,13 +14,13 @@ const (
 )
 
 type VolumeStrategy struct {
-	MinVolume       *sdk.Int
-	MaxVolume       *sdk.Int
-	RemainingVolume *sdk.Int
+	MinVolume       *math.Int
+	MaxVolume       *math.Int
+	RemainingVolume *math.Int
 	OrderType       string
 	LastRun         *time.Time
-	ExtraMinVolume  *sdk.Int
-	ExtraMaxVolume  *sdk.Int
+	ExtraMinVolume  *math.Int
+	ExtraMaxVolume  *math.Int
 	TradesCount     int64
 	Type            string
 }
@@ -32,10 +33,10 @@ func (v *VolumeStrategy) GetTradesCount() int64 {
 	return v.TradesCount
 }
 
-func (v *VolumeStrategy) SetRemainingAmount(amount *sdk.Int) {
+func (v *VolumeStrategy) SetRemainingAmount(amount *math.Int) {
 	v.RemainingVolume = amount
 	if !v.RemainingVolume.IsPositive() {
-		zero := sdk.ZeroInt()
+		zero := math.ZeroInt()
 		v.RemainingVolume = &zero
 	}
 }
@@ -48,15 +49,15 @@ func (v *VolumeStrategy) SetLastRunAt(time *time.Time) {
 	v.LastRun = time
 }
 
-func (v *VolumeStrategy) GetMinAmount() *sdk.Int {
+func (v *VolumeStrategy) GetMinAmount() *math.Int {
 	return v.MinVolume
 }
 
-func (v *VolumeStrategy) GetMaxAmount() *sdk.Int {
+func (v *VolumeStrategy) GetMaxAmount() *math.Int {
 	return v.MaxVolume
 }
 
-func (v *VolumeStrategy) GetRemainingAmount() *sdk.Int {
+func (v *VolumeStrategy) GetRemainingAmount() *math.Int {
 	return v.RemainingVolume
 }
 
@@ -64,11 +65,11 @@ func (v *VolumeStrategy) GetOrderType() string {
 	return v.OrderType
 }
 
-func (v *VolumeStrategy) GetExtraMinVolume() *sdk.Int {
+func (v *VolumeStrategy) GetExtraMinVolume() *math.Int {
 	return v.ExtraMinVolume
 }
 
-func (v *VolumeStrategy) GetExtraMaxVolume() *sdk.Int {
+func (v *VolumeStrategy) GetExtraMaxVolume() *math.Int {
 	return v.ExtraMaxVolume
 }
 

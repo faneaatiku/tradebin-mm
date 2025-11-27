@@ -1,12 +1,13 @@
 package internal
 
 import (
-	tradebinTypes "github.com/bze-alphateam/bze/x/tradebin/types"
-	"github.com/cosmos/cosmos-sdk/types"
 	"math/big"
 	"math/rand"
 	"slices"
 	"time"
+
+	"cosmossdk.io/math"
+	tradebinTypes "github.com/bze-alphateam/bze/x/tradebin/types"
 )
 
 func SortOrdersByPrice(orders []tradebinTypes.Order, reverse bool) {
@@ -16,8 +17,8 @@ func SortOrdersByPrice(orders []tradebinTypes.Order, reverse bool) {
 	}
 
 	slices.SortStableFunc(orders, func(i, j tradebinTypes.Order) int {
-		decI := types.MustNewDecFromStr(i.GetPrice())
-		decJ := types.MustNewDecFromStr(j.GetPrice())
+		decI := math.LegacyMustNewDecFromStr(i.GetPrice())
+		decJ := math.LegacyMustNewDecFromStr(j.GetPrice())
 		diff := decI.Sub(decJ)
 		if diff.IsPositive() {
 			return 1 * mult
@@ -29,7 +30,7 @@ func SortOrdersByPrice(orders []tradebinTypes.Order, reverse bool) {
 	})
 }
 
-func MustRandomInt(min, max *types.Int) types.Int {
+func MustRandomInt(min, max *math.Int) math.Int {
 	// Ensure min is less than or equal to max
 	if min.GT(*max) {
 		panic("min must be less than or equal to max")
@@ -46,5 +47,5 @@ func MustRandomInt(min, max *types.Int) types.Int {
 	randomBigInt.Add(randomBigInt, min.BigInt())
 
 	// Return the result as types.Int
-	return types.NewIntFromBigInt(randomBigInt)
+	return math.NewIntFromBigInt(randomBigInt)
 }

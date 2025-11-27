@@ -1,7 +1,7 @@
 package config
 
 import (
-	"github.com/cosmos/cosmos-sdk/types"
+	"cosmossdk.io/math"
 )
 
 var (
@@ -33,7 +33,7 @@ func (o *Orders) Validate() error {
 		return ErrInvalidSellNo
 	}
 
-	stepDec, err := types.NewDecFromStr(o.Step)
+	stepDec, err := math.LegacyNewDecFromStr(o.Step)
 	if err != nil {
 		return ErrInvalidStep
 	}
@@ -42,7 +42,7 @@ func (o *Orders) Validate() error {
 		return ErrInvalidStep
 	}
 
-	startPriceDec, err := types.NewDecFromStr(o.StartPrice)
+	startPriceDec, err := math.LegacyNewDecFromStr(o.StartPrice)
 	if err != nil {
 		return ErrInvalidStartPrice
 	}
@@ -70,8 +70,8 @@ func (o *Orders) GetSellNo() int {
 	return o.Sell
 }
 
-func (o *Orders) GetStartPriceDec() *types.Dec {
-	num, err := types.NewDecFromStr(o.StartPrice)
+func (o *Orders) GetStartPriceDec() *math.LegacyDec {
+	num, err := math.LegacyNewDecFromStr(o.StartPrice)
 	if err != nil {
 		panic(err)
 	}
@@ -79,8 +79,8 @@ func (o *Orders) GetStartPriceDec() *types.Dec {
 	return &num
 }
 
-func (o *Orders) GetPriceStepDec() *types.Dec {
-	num, err := types.NewDecFromStr(o.Step)
+func (o *Orders) GetPriceStepDec() *math.LegacyDec {
+	num, err := math.LegacyNewDecFromStr(o.Step)
 	if err != nil {
 		panic(err)
 	}
@@ -88,20 +88,20 @@ func (o *Orders) GetPriceStepDec() *types.Dec {
 	return &num
 }
 
-func (o *Orders) GetOrderMinAmount() *types.Int {
-	num := types.NewInt(o.MinAmount)
+func (o *Orders) GetOrderMinAmount() *math.Int {
+	num := math.NewInt(o.MinAmount)
 
 	return &num
 }
 
-func (o *Orders) GetOrderMaxAmount() *types.Int {
-	num := types.NewInt(o.MaxAmount)
+func (o *Orders) GetOrderMaxAmount() *math.Int {
+	num := math.NewInt(o.MaxAmount)
 
 	return &num
 }
 
-func (o *Orders) GetSpreadSteps() *types.Int {
-	num := types.NewInt(o.SpreadSteps)
+func (o *Orders) GetSpreadSteps() *math.Int {
+	num := math.NewInt(o.SpreadSteps)
 
 	return &num
 }
