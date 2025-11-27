@@ -4,6 +4,7 @@ type Transaction struct {
 	GasAdjustment float64 `yaml:"gas_adjustment"`
 	GasPrices     string  `yaml:"gas_prices"`
 	ChainId       string  `yaml:"chain_id"`
+	AddressPrefix string  `yaml:"address_prefix"`
 }
 
 func (t *Transaction) GetGasPrices() string {
@@ -16,6 +17,14 @@ func (t *Transaction) GetGasAdjustment() float64 {
 
 func (t *Transaction) GetChainId() string {
 	return t.ChainId
+}
+
+func (t *Transaction) GetAddressPrefix() string {
+	if t.AddressPrefix == "" {
+		return "bze"
+	}
+
+	return t.AddressPrefix
 }
 
 func (t *Transaction) Validate() error {

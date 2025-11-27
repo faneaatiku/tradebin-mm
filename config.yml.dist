@@ -30,3 +30,5 @@ transaction:
     gas_adjustment: 1.5 # the gas adjustment to use for transactions
     gas_prices: "0.1ubze" # the gas prices to use for transactions
     chain_id: "beezee-1"
+    address_prefix: "bze"
+    

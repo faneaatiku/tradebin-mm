@@ -2,6 +2,7 @@ package wallet
 
 import (
 	"fmt"
+
 	"github.com/cosmos/cosmos-sdk/crypto/hd"
 	"github.com/cosmos/cosmos-sdk/crypto/keys/secp256k1"
 	"github.com/cosmos/cosmos-sdk/types"
@@ -10,7 +11,6 @@ import (
 
 const (
 	bip44Path = "m/44'/118'/0'/0/0"
-	prefix    = "bze"
 )
 
 type Wallet struct {
@@ -18,9 +18,9 @@ type Wallet struct {
 	Key     *secp256k1.PrivKey
 }
 
-func NewWallet(mnemonic string) (*Wallet, error) {
+func NewWallet(mnemonic, addressPrefix string) (*Wallet, error) {
 	config := types.GetConfig()
-	config.SetBech32PrefixForAccount(prefix, prefix+"pub")
+	config.SetBech32PrefixForAccount(addressPrefix, addressPrefix+"pub")
 
 	// Validate the mnemonic
 	if !bip39.IsMnemonicValid(mnemonic) {

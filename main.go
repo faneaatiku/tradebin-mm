@@ -66,7 +66,7 @@ func main() {
 }
 
 func withdrawAllBalances(cfg *config.Config, l logrus.FieldLogger) {
-	w, err := wallet.NewWallet(cfg.Wallet.Mnemonic)
+	w, err := wallet.NewWallet(cfg.Wallet.Mnemonic, cfg.Transaction.GetAddressPrefix())
 	if err != nil {
 		log.Fatalf("could not create wallet: %v", err)
 	}
@@ -115,7 +115,7 @@ func withdrawAllBalances(cfg *config.Config, l logrus.FieldLogger) {
 }
 
 func cancelOrders(cfg *config.Config, l logrus.FieldLogger) {
-	w, err := wallet.NewWallet(cfg.Wallet.Mnemonic)
+	w, err := wallet.NewWallet(cfg.Wallet.Mnemonic, cfg.Transaction.GetAddressPrefix())
 	if err != nil {
 		log.Fatalf("could not create wallet: %v", err)
 	}
@@ -154,7 +154,7 @@ func cancelOrders(cfg *config.Config, l logrus.FieldLogger) {
 }
 
 func startMarketMaking(cfg *config.Config, l logrus.FieldLogger) {
-	w, err := wallet.NewWallet(cfg.Wallet.Mnemonic)
+	w, err := wallet.NewWallet(cfg.Wallet.Mnemonic, cfg.Transaction.GetAddressPrefix())
 	if err != nil {
 		log.Fatalf("could not create wallet: %v", err)
 	}

@@ -2,19 +2,45 @@ package service
 
 import (
 	"context"
-	authv1beta1 "cosmossdk.io/api/cosmos/auth/v1beta1"
 	"fmt"
-	bzeApp "github.com/bze-alphateam/bze/app"
+	"tradebin-mm/app/internal"
+
+	authv1beta1 "cosmossdk.io/api/cosmos/auth/v1beta1"
+	"github.com/cosmos/cosmos-sdk/client"
 	"github.com/cosmos/cosmos-sdk/client/tx"
+	"github.com/cosmos/cosmos-sdk/codec"
+	codectypes "github.com/cosmos/cosmos-sdk/codec/types"
 	"github.com/cosmos/cosmos-sdk/crypto/keys/secp256k1"
+	"github.com/cosmos/cosmos-sdk/std"
 	"github.com/cosmos/cosmos-sdk/types"
 	sdk "github.com/cosmos/cosmos-sdk/types"
 	sdkTx "github.com/cosmos/cosmos-sdk/types/tx"
 	"github.com/cosmos/cosmos-sdk/types/tx/signing"
 	xauthsigning "github.com/cosmos/cosmos-sdk/x/auth/signing"
+	authtx "github.com/cosmos/cosmos-sdk/x/auth/tx"
 	"github.com/sirupsen/logrus"
-	"tradebin-mm/app/internal"
 )
+
+// EncodingConfig specifies the concrete encoding types to use for a given app.
+type EncodingConfig struct {
+	InterfaceRegistry codectypes.InterfaceRegistry
+	Codec             codec.Codec
+	TxConfig          client.TxConfig
+}
+
+// makeEncodingConfig creates an EncodingConfig for the broadcaster.
+func makeEncodingConfig() EncodingConfig {
+	interfaceRegistry := codectypes.NewInterfaceRegistry()
+	std.RegisterInterfaces(interfaceRegistry)
+	protoCodec := codec.NewProtoCodec(interfaceRegistry)
+	txConfig := authtx.NewTxConfig(protoCodec, authtx.DefaultSignModes)
+
+	return EncodingConfig{
+		InterfaceRegistry: interfaceRegistry,
+		Codec:             protoCodec,
+		TxConfig:          txConfig,
+	}
+}
 
 type clientProvider interface {
 	GetServiceClient() (sdkTx.ServiceClient, error)
@@ -30,6 +56,7 @@ type txConfig interface {
 	GetGasPrices() string
 	GetGasAdjustment() float64
 	GetChainId() string
+	GetAddressPrefix() string
 }
 
 type Broadcaster struct {
@@ -45,6 +72,20 @@ func NewBroadcaster(l logrus.FieldLogger, tx txConfig, pk wallet, cp clientProvi
 		return nil, internal.NewInvalidDependenciesErr("NewBroadcaster")
 	}
 
+	AccountAddressPrefix := tx.GetAddressPrefix()
+	// Set prefixes
+	accountPubKeyPrefix := AccountAddressPrefix + "pub"
+	validatorAddressPrefix := AccountAddressPrefix + "valoper"
+	validatorPubKeyPrefix := AccountAddressPrefix + "valoperpub"
+	consNodeAddressPrefix := AccountAddressPrefix + "valcons"
+	consNodePubKeyPrefix := AccountAddressPrefix + "valconspub"
+
+	// Set and seal config
+	config := sdk.GetConfig()
+	config.SetBech32PrefixForAccount(AccountAddressPrefix, accountPubKeyPrefix)
+	config.SetBech32PrefixForValidator(validatorAddressPrefix, validatorPubKeyPrefix)
+	config.SetBech32PrefixForConsensusNode(consNodeAddressPrefix, consNodePubKeyPrefix)
+
 	return &Broadcaster{
 		l:  l,
 		tx: tx,
@@ -54,7 +95,7 @@ func NewBroadcaster(l logrus.FieldLogger, tx txConfig, pk wallet, cp clientProvi
 }
 
 func (o *Broadcaster) BroadcastBlock(msgs []sdk.Msg) error {
-	return o.Broadcast(msgs, sdkTx.BroadcastMode_BROADCAST_MODE_BLOCK)
+	return o.Broadcast(msgs, sdkTx.BroadcastMode_BROADCAST_MODE_SYNC)
 }
 
 func (o *Broadcaster) Broadcast(msgs []sdk.Msg, mode sdkTx.BroadcastMode) error {
@@ -84,7 +125,7 @@ func (o *Broadcaster) Broadcast(msgs []sdk.Msg, mode sdkTx.BroadcastMode) error 
 		return fmt.Errorf("failed to unmarshal account: %w", err)
 	}
 
-	encCfg := bzeApp.MakeEncodingConfig()
+	encCfg := makeEncodingConfig()
 	txBuilder := encCfg.TxConfig.NewTxBuilder()
 
 	err = txBuilder.SetMsgs(msgs...)
@@ -96,7 +137,7 @@ func (o *Broadcaster) Broadcast(msgs []sdk.Msg, mode sdkTx.BroadcastMode) error 
 	sigV2 := signing.SignatureV2{
 		PubKey: o.pk.GetPrivateKey().PubKey(),
 		Data: &signing.SingleSignatureData{
-			SignMode:  encCfg.TxConfig.SignModeHandler().DefaultMode(),
+			SignMode:  signing.SignMode_SIGN_MODE_DIRECT,
 			Signature: nil,
 		},
 		Sequence: baseAcc.Sequence,
@@ -114,7 +155,8 @@ func (o *Broadcaster) Broadcast(msgs []sdk.Msg, mode sdkTx.BroadcastMode) error 
 	}
 
 	sigV2, err = tx.SignWithPrivKey(
-		encCfg.TxConfig.SignModeHandler().DefaultMode(),
+		context.Background(),
+		signing.SignMode_SIGN_MODE_DIRECT,
 		signerData,
 		txBuilder,
 		o.pk.GetPrivateKey(),
@@ -163,7 +205,8 @@ func (o *Broadcaster) Broadcast(msgs []sdk.Msg, mode sdkTx.BroadcastMode) error 
 	txBuilder.SetFeeAmount(fee)
 
 	sigV2, err = tx.SignWithPrivKey(
-		encCfg.TxConfig.SignModeHandler().DefaultMode(),
+		context.Background(),
+		signing.SignMode_SIGN_MODE_DIRECT,
 		signerData,
 		txBuilder,
 		o.pk.GetPrivateKey(),
