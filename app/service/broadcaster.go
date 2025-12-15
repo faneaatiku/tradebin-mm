@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"fmt"
+	"sync"
 	"tradebin-mm/app/internal"
 
 	authv1beta1 "cosmossdk.io/api/cosmos/auth/v1beta1"
@@ -65,6 +66,12 @@ type Broadcaster struct {
 
 	pk wallet
 	cp clientProvider
+
+	// Sequence tracking
+	mu             sync.Mutex
+	cachedSequence uint64
+	sequenceValid  bool
+	accountNumber  uint64
 }
 
 func NewBroadcaster(l logrus.FieldLogger, tx txConfig, pk wallet, cp clientProvider) (*Broadcaster, error) {
@@ -99,36 +106,54 @@ func (o *Broadcaster) BroadcastBlock(msgs []sdk.Msg) error {
 }
 
 func (o *Broadcaster) Broadcast(msgs []sdk.Msg, mode sdkTx.BroadcastMode) error {
+	// Lock to prevent concurrent broadcasts with sequence mismatch
+	o.mu.Lock()
+	defer o.mu.Unlock()
+
 	if len(msgs) == 0 {
 		return fmt.Errorf("no messages to broadcast")
 	}
 
 	o.l.Debugf("broadcasting messages: %v", msgs)
 
-	authCl, err := o.cp.GetAuthQueryClient()
-	if err != nil {
-		return err
-	}
+	var sequence uint64
+	var accountNumber uint64
 
-	resp, err := authCl.Account(context.Background(), &authv1beta1.QueryAccountRequest{Address: o.pk.GetAddress().String()})
-	if err != nil {
-		return err
-	}
+	// Use cached sequence if valid, otherwise query from chain
+	if o.sequenceValid {
+		sequence = o.cachedSequence
+		accountNumber = o.accountNumber
+		o.l.Debugf("using cached sequence: %d", sequence)
+	} else {
+		authCl, err := o.cp.GetAuthQueryClient()
+		if err != nil {
+			return err
+		}
 
-	acc := resp.GetAccount()
-	if acc == nil {
-		return fmt.Errorf("account not found")
-	}
+		resp, err := authCl.Account(context.Background(), &authv1beta1.QueryAccountRequest{Address: o.pk.GetAddress().String()})
+		if err != nil {
+			return err
+		}
 
-	baseAcc := &authv1beta1.BaseAccount{}
-	if err := acc.UnmarshalTo(baseAcc); err != nil {
-		return fmt.Errorf("failed to unmarshal account: %w", err)
+		acc := resp.GetAccount()
+		if acc == nil {
+			return fmt.Errorf("account not found")
+		}
+
+		baseAcc := &authv1beta1.BaseAccount{}
+		if err := acc.UnmarshalTo(baseAcc); err != nil {
+			return fmt.Errorf("failed to unmarshal account: %w", err)
+		}
+
+		sequence = baseAcc.Sequence
+		accountNumber = baseAcc.AccountNumber
+		o.l.Debugf("queried sequence from chain: %d", sequence)
 	}
 
 	encCfg := makeEncodingConfig()
 	txBuilder := encCfg.TxConfig.NewTxBuilder()
 
-	err = txBuilder.SetMsgs(msgs...)
+	err := txBuilder.SetMsgs(msgs...)
 	if err != nil {
 		return err
 	}
@@ -140,7 +165,7 @@ func (o *Broadcaster) Broadcast(msgs []sdk.Msg, mode sdkTx.BroadcastMode) error 
 			SignMode:  signing.SignMode_SIGN_MODE_DIRECT,
 			Signature: nil,
 		},
-		Sequence: baseAcc.Sequence,
+		Sequence: sequence,
 	}
 
 	err = txBuilder.SetSignatures(sigV2)
@@ -150,8 +175,8 @@ func (o *Broadcaster) Broadcast(msgs []sdk.Msg, mode sdkTx.BroadcastMode) error 
 
 	signerData := xauthsigning.SignerData{
 		ChainID:       o.tx.GetChainId(),
-		AccountNumber: baseAcc.AccountNumber,
-		Sequence:      baseAcc.Sequence,
+		AccountNumber: accountNumber,
+		Sequence:      sequence,
 	}
 
 	sigV2, err = tx.SignWithPrivKey(
@@ -161,7 +186,7 @@ func (o *Broadcaster) Broadcast(msgs []sdk.Msg, mode sdkTx.BroadcastMode) error 
 		txBuilder,
 		o.pk.GetPrivateKey(),
 		encCfg.TxConfig,
-		baseAcc.Sequence,
+		sequence,
 	)
 	if err != nil {
 		return err
@@ -211,7 +236,7 @@ func (o *Broadcaster) Broadcast(msgs []sdk.Msg, mode sdkTx.BroadcastMode) error 
 		txBuilder,
 		o.pk.GetPrivateKey(),
 		encCfg.TxConfig,
-		baseAcc.Sequence,
+		sequence,
 	)
 	if err != nil {
 		return err
@@ -241,9 +266,15 @@ func (o *Broadcaster) Broadcast(msgs []sdk.Msg, mode sdkTx.BroadcastMode) error 
 	}
 
 	if grpcRes.TxResponse.Code != 0 {
+		// Invalidate cached sequence on error
+		o.sequenceValid = false
 		return fmt.Errorf("failed to broadcast tx: %v", grpcRes)
 	} else {
 		o.l.Infof("broadcasted tx: %v", grpcRes.TxResponse.TxHash)
+		// Update cached sequence for next transaction
+		o.cachedSequence = sequence + 1
+		o.accountNumber = accountNumber
+		o.sequenceValid = true
 	}
 
 	return nil
