@@ -215,6 +215,7 @@ func (o *Broadcaster) Broadcast(msgs []sdk.Msg, mode sdkTx.BroadcastMode) error 
 		},
 	)
 	if err != nil {
+		o.sequenceValid = false
 		return err
 	}
 	o.l.Debugf("simulated tx: %v", simulate.GasInfo)
