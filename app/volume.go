@@ -32,6 +32,8 @@ type volumeConfig interface {
 	GetExtraEvery() int64
 	GetStrategy() string
 	GetHoldBackSeconds() int
+	GetInventorySkewEnabled() bool
+	GetInventorySkew() float64
 }
 
 type volumeStrategy interface {
@@ -157,7 +159,7 @@ func (v *Volume) MakeVolume() error {
 		}
 	}
 
-	order, orderAmount, msgs := v.makeOrder(strategy, buys, sells)
+	order, orderAmount, msgs := v.makeOrder(strategy, buys, sells, balances)
 	if order == nil || !orderAmount.IsPositive() || len(msgs) == 0 {
 		return nil
 	}
@@ -189,7 +191,67 @@ func (v *Volume) ackOrder(orderAmount math.Int) {
 	v.strategy.IncrementTradesCount()
 }
 
-func (v *Volume) makeOrder(strategy volumeStrategy, buys, sells []tradebinTypes.AggregatedOrder) (msg *tradebinTypes.MsgCreateOrder, orderAmount math.Int, msgs []*tradebinTypes.MsgCreateOrder) {
+// applyInventorySkew adjusts the order amount based on current inventory balance
+// Returns the adjusted amount
+func (v *Volume) applyInventorySkew(orderAmount math.Int, orderType string, balances *dto.MarketBalance, currentPrice math.LegacyDec) math.Int {
+	if !v.cfg.GetInventorySkewEnabled() {
+		return orderAmount
+	}
+
+	// Calculate inventory ratio
+	baseValue := balances.BaseBalance.Amount.ToLegacyDec().Mul(currentPrice)
+	quoteValue := balances.QuoteBalance.Amount.ToLegacyDec()
+	totalValue := baseValue.Add(quoteValue)
+
+	if !totalValue.IsPositive() {
+		v.l.Debug("total value is not positive, skipping inventory skew")
+		return orderAmount
+	}
+
+	// inventoryRatio ranges from -1 to 1
+	// Positive means too much base asset
+	// Negative means too much quote asset
+	inventoryRatio := baseValue.Sub(quoteValue).Quo(totalValue)
+
+	skewMultiplier := math.LegacyMustNewDecFromStr(fmt.Sprintf("%f", v.cfg.GetInventorySkew()))
+
+	var adjustment math.LegacyDec
+	if orderType == tradebinTypes.OrderTypeBuy {
+		// Buying means acquiring more base
+		// If we have too much base (inventoryRatio > 0), reduce buy size
+		adjustment = math.LegacyOneDec().Sub(inventoryRatio.Mul(skewMultiplier))
+	} else {
+		// Selling means reducing base
+		// If we have too much base (inventoryRatio > 0), increase sell size
+		adjustment = math.LegacyOneDec().Add(inventoryRatio.Mul(skewMultiplier))
+	}
+
+	// Ensure adjustment is positive and reasonable (between 0.1 and 2.0)
+	minAdjustment := math.LegacyMustNewDecFromStr("0.1")
+	maxAdjustment := math.LegacyMustNewDecFromStr("2.0")
+	if adjustment.LT(minAdjustment) {
+		adjustment = minAdjustment
+	}
+	if adjustment.GT(maxAdjustment) {
+		adjustment = maxAdjustment
+	}
+
+	adjustedAmount := orderAmount.ToLegacyDec().Mul(adjustment).TruncateInt()
+
+	v.l.WithFields(map[string]interface{}{
+		"order_type":      orderType,
+		"original_amount": orderAmount.String(),
+		"adjusted_amount": adjustedAmount.String(),
+		"inventory_ratio": inventoryRatio.String(),
+		"adjustment_mult": adjustment.String(),
+		"base_value":      baseValue.String(),
+		"quote_value":     quoteValue.String(),
+	}).Debug("inventory skew applied")
+
+	return adjustedAmount
+}
+
+func (v *Volume) makeOrder(strategy volumeStrategy, buys, sells []tradebinTypes.AggregatedOrder, balances *dto.MarketBalance) (msg *tradebinTypes.MsgCreateOrder, orderAmount math.Int, msgs []*tradebinTypes.MsgCreateOrder) {
 	var bookOrder tradebinTypes.AggregatedOrder
 	if strategy.GetOrderType() == tradebinTypes.OrderTypeBuy {
 		bookOrder = sells[0]
@@ -198,15 +260,19 @@ func (v *Volume) makeOrder(strategy volumeStrategy, buys, sells []tradebinTypes.
 	}
 
 	if v.isCarouselStrategy(strategy.GetType()) {
-		return v.makeCarouselOrder(strategy, &bookOrder)
+		return v.makeCarouselOrder(strategy, &bookOrder, balances)
 	}
 
-	return v.makeSpreadOrder(strategy, buys, sells)
+	return v.makeSpreadOrder(strategy, buys, sells, balances)
 }
 
-func (v *Volume) makeCarouselOrder(strategy volumeStrategy, bookOrder *tradebinTypes.AggregatedOrder) (msg *tradebinTypes.MsgCreateOrder, orderAmount math.Int, msgs []*tradebinTypes.MsgCreateOrder) {
+func (v *Volume) makeCarouselOrder(strategy volumeStrategy, bookOrder *tradebinTypes.AggregatedOrder, balances *dto.MarketBalance) (msg *tradebinTypes.MsgCreateOrder, orderAmount math.Int, msgs []*tradebinTypes.MsgCreateOrder) {
 	l := v.l.WithField("func", "makeCarouselOrder")
 	msgs = []*tradebinTypes.MsgCreateOrder{}
+
+	// Calculate current price from the book order
+	currentPrice := math.LegacyMustNewDecFromStr(bookOrder.Price)
+
 	extraAmount := math.ZeroInt()
 	var extraMsg *tradebinTypes.MsgCreateOrder
 	if strategy.GetExtraMaxVolume().IsPositive() &&
@@ -214,6 +280,8 @@ func (v *Volume) makeCarouselOrder(strategy volumeStrategy, bookOrder *tradebinT
 		strategy.GetTradesCount() > 0 {
 		l.Debug("extra volume is required. adding a new order to fill immediately")
 		extraAmount = internal.MustRandomInt(strategy.GetExtraMinVolume(), strategy.GetExtraMaxVolume())
+		// Apply inventory skew to extra amount
+		extraAmount = v.applyInventorySkew(extraAmount, bookOrder.GetOrderType(), balances, currentPrice)
 		if extraAmount.IsPositive() {
 			extraMsg = tradebinTypes.NewMsgCreateOrder(
 				v.addressProvider.GetAddress().String(),
@@ -230,6 +298,10 @@ func (v *Volume) makeCarouselOrder(strategy volumeStrategy, bookOrder *tradebinT
 	}
 
 	orderAmount = internal.MustRandomInt(strategy.GetMinAmount(), strategy.GetMaxAmount())
+
+	// Apply inventory skew to main order amount
+	orderAmount = v.applyInventorySkew(orderAmount, strategy.GetOrderType(), balances, currentPrice)
+
 	if !extraAmount.IsPositive() && orderAmount.GT(*strategy.GetRemainingAmount()) {
 		l.Debug("order amount is greater than remaining amount")
 		orderAmount = *strategy.GetRemainingAmount()
@@ -254,7 +326,7 @@ func (v *Volume) makeCarouselOrder(strategy volumeStrategy, bookOrder *tradebinT
 	return msg, orderAmount, msgs
 }
 
-func (v *Volume) makeSpreadOrder(strategy volumeStrategy, buys, sells []tradebinTypes.AggregatedOrder) (msg *tradebinTypes.MsgCreateOrder, orderAmount math.Int, msgs []*tradebinTypes.MsgCreateOrder) {
+func (v *Volume) makeSpreadOrder(strategy volumeStrategy, buys, sells []tradebinTypes.AggregatedOrder, balances *dto.MarketBalance) (msg *tradebinTypes.MsgCreateOrder, orderAmount math.Int, msgs []*tradebinTypes.MsgCreateOrder) {
 	l := v.l.WithField("func", "makeSpreadOrder")
 	bookBuyPrice := math.LegacyMustNewDecFromStr(buys[0].Price)
 	bookSellPrice := math.LegacyMustNewDecFromStr(sells[0].Price)
@@ -285,9 +357,15 @@ func (v *Volume) makeSpreadOrder(strategy volumeStrategy, buys, sells []tradebin
 		strategy.GetTradesCount() > 0 {
 		l.Debug("extra volume is required. adding a new order to fill immediately")
 		extraAmount = internal.MustRandomInt(strategy.GetExtraMinVolume(), strategy.GetExtraMaxVolume())
+		// Apply inventory skew to extra amount
+		extraAmount = v.applyInventorySkew(extraAmount, strategy.GetOrderType(), balances, priceDec)
 	}
 
 	orderAmount = internal.MustRandomInt(strategy.GetMinAmount(), strategy.GetMaxAmount())
+
+	// Apply inventory skew to main order amount
+	orderAmount = v.applyInventorySkew(orderAmount, strategy.GetOrderType(), balances, priceDec)
+
 	if orderAmount.GT(*strategy.GetRemainingAmount()) {
 		l.Debug("order amount is greater than remaining amount")
 		orderAmount = *strategy.GetRemainingAmount()

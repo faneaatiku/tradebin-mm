@@ -20,7 +20,9 @@ volume:
     extra_min: 2000000 # the minimum amount to extra trade for higher volume
     extra_max: 4000000 # the maximum amount to extra trade for higher volume
     extra_every: 3 # how often to add the maximum amount
-    hold_back_interval: 300 #the number of seconds to wait when other trades happen (excluding self trades), before making volume
+    hold_back_interval: 300 # the number of seconds to wait when other trades happen (excluding self trades), before making volume
+    inventory_skew_enabled: false # enable inventory skew to automatically balance base/quote assets
+    inventory_skew: 0.3 # inventory skew multiplier (0-1): higher values = more aggressive rebalancing. Recommended: 0.3
 wallet:
     mnemonic: "your SUPER SECRET mnemonic" # the mnemonic of the wallet
 client:

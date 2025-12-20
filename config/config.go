@@ -61,14 +61,16 @@ func (m *Market) GetMarketId() string {
 }
 
 type Volume struct {
-	Min           float64 `yaml:"min"`
-	Max           float64 `yaml:"max"`
-	TradeInterval float64 `yaml:"trade_interval"`
-	ExtraMin      float64 `yaml:"extra_min"`
-	ExtraMax      float64 `yaml:"extra_max"`
-	ExtraEvery    int64   `yaml:"extra_every"`
-	Strategy      string  `yaml:"strategy"`
-	HoldBack      int     `yaml:"hold_back_interval"`
+	Min                  float64 `yaml:"min"`
+	Max                  float64 `yaml:"max"`
+	TradeInterval        float64 `yaml:"trade_interval"`
+	ExtraMin             float64 `yaml:"extra_min"`
+	ExtraMax             float64 `yaml:"extra_max"`
+	ExtraEvery           int64   `yaml:"extra_every"`
+	Strategy             string  `yaml:"strategy"`
+	HoldBack             int     `yaml:"hold_back_interval"`
+	InventorySkewEnabled bool    `yaml:"inventory_skew_enabled"`
+	InventorySkew        float64 `yaml:"inventory_skew"`
 }
 
 func (v *Volume) GetMin() int64 {
@@ -101,6 +103,14 @@ func (v *Volume) GetHoldBackSeconds() int {
 	return v.HoldBack
 }
 
+func (v *Volume) GetInventorySkewEnabled() bool {
+	return v.InventorySkewEnabled
+}
+
+func (v *Volume) GetInventorySkew() float64 {
+	return v.InventorySkew
+}
+
 func (v *Volume) Validate() error {
 	if v.Min <= 0 {
 		return NewConfigError("min is required")
@@ -124,6 +134,12 @@ func (v *Volume) Validate() error {
 
 	if v.HoldBack <= 0 {
 		v.HoldBack = v.GetTradeInterval()
+	}
+
+	if v.InventorySkewEnabled {
+		if v.InventorySkew <= 0 || v.InventorySkew > 1 {
+			return NewConfigError("inventory_skew must be between 0 and 1 when enabled")
+		}
 	}
 
 	return nil
