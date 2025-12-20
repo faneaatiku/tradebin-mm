@@ -1,14 +1,36 @@
 logging:
     level: "debug" # the logging level
 orders:
+    # Strategy selection (backward compatible - defaults to "fixed")
+    liquidity_strategy: "fixed"  # "fixed" or "clmm"
+
+    # Number of price levels per side (used by both strategies)
     buy_no: 10 # the number of buy orders to place
     sell_no: 10 # the number of sell orders to place
-    step: 0.1 # the amount between orders prices
-    spread_steps: 5 # the number of steps to leave empty in the spread
-    start_price: 100 # the price to start trading at - ignored if order book spread already exists
+
+    # Order size bounds (used by both strategies)
     min_amount: 500000
     max_amount: 2000000
+
+    # CLMM: Price range configuration (only used if liquidity_strategy = "clmm")
+    range_type: "percentage"     # "percentage" or "fixed"
+    range_pct: 5.0              # ±5% from mid-price (e.g., 95-105 if mid=100)
+    # Alternative for fixed range:
+    # range_type: "fixed"
+    # range_lower: "95.0"
+    # range_upper: "105.0"
+
+    # CLMM: Liquidity concentration (only used if liquidity_strategy = "clmm")
+    concentration_factor: 2.0    # Higher value = more liquidity near mid-price
+                                 # 1.0 = uniform, 2.0 = exponential decay, 3.0+ = very concentrated
+
+    # Common settings
+    start_price: 100 # the price to start trading at - ignored if order book spread already exists
     hold_back_interval: 300 #the number of seconds to wait when other trades happen (excluding self trades), before filling the order book
+
+    # Legacy fields (only used if liquidity_strategy = "fixed")
+    step: 0.1 # the amount between orders prices
+    spread_steps: 5 # the number of steps to leave empty in the spread
 market:
     base_denom: "factory/bze13gzq40che93tgfm9kzmkpjamah5nj0j73pyhqk/uvdl" # the base currency
     quote_denom: "ubze" # the quote currency

@@ -2,6 +2,7 @@ package app
 
 import (
 	"fmt"
+	stdmath "math"
 	"time"
 	"tradebin-mm/app/data_provider"
 	"tradebin-mm/app/dto"
@@ -46,6 +47,14 @@ type ordersConfig interface {
 	GetOrderMaxAmount() *math.Int
 	GetSpreadSteps() *math.Int
 	GetHoldBackSeconds() int
+
+	// CLMM strategy methods
+	GetLiquidityStrategy() string
+	GetRangeType() string
+	GetRangePct() float64
+	GetRangeLowerDec() *math.LegacyDec
+	GetRangeUpperDec() *math.LegacyDec
+	GetConcentrationFactor() float64
 }
 
 type Orders struct {
@@ -85,6 +94,17 @@ func NewOrdersFiller(
 }
 
 func (v *Orders) FillOrderBook() error {
+	strategy := v.ordersConfig.GetLiquidityStrategy()
+
+	if strategy == "clmm" {
+		return v.fillOrderBookCLMM()
+	}
+
+	// Default: use fixed grid strategy
+	return v.fillOrderBookFixed()
+}
+
+func (v *Orders) fillOrderBookFixed() error {
 	balances, err := v.balanceProvider.GetMarketBalance(v.addressProvider.GetAddress().String(), v.marketConfig)
 	if err != nil {
 		return fmt.Errorf("failed to get balances: %v", err)
@@ -139,6 +159,97 @@ func (v *Orders) FillOrderBook() error {
 		return fmt.Errorf("failed to fill buy orders: %v", err)
 	}
 
+	return nil
+}
+
+func (v *Orders) fillOrderBookCLMM() error {
+	l := v.l.WithField("func", "fillOrderBookCLMM")
+
+	// Get balances
+	balances, err := v.balanceProvider.GetMarketBalance(v.addressProvider.GetAddress().String(), v.marketConfig)
+	if err != nil {
+		return fmt.Errorf("failed to get balances: %v", err)
+	}
+
+	// Get my existing orders
+	requiredOrders := v.ordersConfig.GetBuyNo() + v.ordersConfig.GetSellNo()
+	myBuys, mySells, err := v.ordersProvider.GetAddressActiveOrders(balances.MarketId, v.addressProvider.GetAddress().String(), requiredOrders*2)
+	if err != nil {
+		return fmt.Errorf("failed to get address active orders: %v", err)
+	}
+
+	// Cancel extra orders if too many
+	myOrdersCount := len(myBuys) + len(mySells)
+	if myOrdersCount > (requiredOrders + cancelOrdersDelta) {
+		l.Info("too many orders placed, cancelling some")
+		err = v.cancelExtraOrders(myBuys, mySells)
+		if err != nil {
+			l.WithError(err).Errorf("failed to cancel extra orders")
+		}
+	}
+
+	// Check hold-back timer
+	if !v.shouldFillOrderBook(balances.MarketId) {
+		l.Info("should not fill order book yet. hold back.")
+		return nil
+	}
+
+	// Get market orders
+	buys, sells, err := v.ordersProvider.GetActiveOrders(balances)
+	if err != nil {
+		return err
+	}
+
+	// Calculate mid-price
+	midPrice := v.calculateMidPrice(buys, sells)
+	if midPrice == nil {
+		l.Info("no mid-price available, using start price")
+		midPrice = v.ordersConfig.GetStartPriceDec()
+	}
+
+	l.WithField("mid_price", midPrice.String()).Debug("calculated mid-price")
+
+	// Calculate price range bounds
+	lowerBound, upperBound, err := v.calculateCLMMRange(*midPrice)
+	if err != nil {
+		return fmt.Errorf("failed to calculate CLMM range: %w", err)
+	}
+
+	l.WithFields(map[string]interface{}{
+		"lower_bound": lowerBound.String(),
+		"upper_bound": upperBound.String(),
+	}).Debug("calculated price range")
+
+	// Calculate inventory ratio for balance-aware distribution
+	inventoryRatio := v.calculateInventoryRatio(balances, *midPrice)
+	l.WithField("inventory_ratio", inventoryRatio).Debug("calculated inventory ratio")
+
+	// Generate price levels
+	concentrationFactor := v.ordersConfig.GetConcentrationFactor()
+	buyPrices := v.generateCLMMPrices(lowerBound, *midPrice, v.ordersConfig.GetBuyNo(), concentrationFactor)
+	sellPrices := v.generateCLMMPrices(*midPrice, upperBound, v.ordersConfig.GetSellNo(), concentrationFactor)
+
+	// Calculate liquidity amounts per price level
+	minAmount := v.ordersConfig.GetOrderMinAmount()
+	maxAmount := v.ordersConfig.GetOrderMaxAmount()
+	buyAmounts := v.calculateCLMMLiquidity(buyPrices, *midPrice, inventoryRatio, concentrationFactor, *minAmount, *maxAmount)
+	sellAmounts := v.calculateCLMMLiquidity(sellPrices, *midPrice, inventoryRatio, concentrationFactor, *minAmount, *maxAmount)
+
+	// Place orders
+	err = v.placeOrdersAtLevels(buyPrices, buyAmounts, tradebinTypes.OrderTypeBuy, myBuys, buys)
+	if err != nil {
+		return fmt.Errorf("failed to place buy orders: %w", err)
+	}
+
+	err = v.placeOrdersAtLevels(sellPrices, sellAmounts, tradebinTypes.OrderTypeSell, mySells, sells)
+	if err != nil {
+		return fmt.Errorf("failed to place sell orders: %w", err)
+	}
+
+	// Cancel orders outside range
+	v.cancelOutOfRangeOrders(lowerBound, upperBound, myBuys, mySells)
+
+	l.Info("CLMM order book filled successfully")
 	return nil
 }
 
@@ -379,4 +490,256 @@ func (v *Orders) shouldFillOrderBook(marketId string) bool {
 	}
 
 	return time.Now().Unix()-history.ExecutedAt > int64(v.ordersConfig.GetHoldBackSeconds())
+}
+
+// CLMM helper functions
+
+func (v *Orders) calculateMidPrice(buys, sells []tradebinTypes.AggregatedOrder) *math.LegacyDec {
+	if len(buys) == 0 || len(sells) == 0 {
+		return nil
+	}
+
+	highestBuy := math.LegacyMustNewDecFromStr(buys[0].Price)
+	lowestSell := math.LegacyMustNewDecFromStr(sells[0].Price)
+
+	midPrice := highestBuy.Add(lowestSell).Quo(math.LegacyNewDec(2))
+	return &midPrice
+}
+
+func (v *Orders) calculateCLMMRange(midPrice math.LegacyDec) (lowerBound, upperBound math.LegacyDec, err error) {
+	rangeType := v.ordersConfig.GetRangeType()
+
+	if rangeType == "percentage" {
+		// Calculate range as ±X% from mid-price
+		pct := v.ordersConfig.GetRangePct()
+		pctDec := math.LegacyMustNewDecFromStr(fmt.Sprintf("%f", pct/100.0))
+
+		lowerBound = midPrice.Mul(math.LegacyOneDec().Sub(pctDec))
+		upperBound = midPrice.Mul(math.LegacyOneDec().Add(pctDec))
+	} else if rangeType == "fixed" {
+		// Use fixed price bounds
+		lowerPtr := v.ordersConfig.GetRangeLowerDec()
+		upperPtr := v.ordersConfig.GetRangeUpperDec()
+
+		if lowerPtr == nil || upperPtr == nil {
+			return lowerBound, upperBound, fmt.Errorf("fixed range bounds not configured")
+		}
+
+		lowerBound = *lowerPtr
+		upperBound = *upperPtr
+	} else {
+		return lowerBound, upperBound, fmt.Errorf("invalid range type: %s", rangeType)
+	}
+
+	return lowerBound, upperBound, nil
+}
+
+func (v *Orders) calculateInventoryRatio(balances *dto.MarketBalance, midPrice math.LegacyDec) float64 {
+	baseValue := balances.BaseBalance.Amount.ToLegacyDec().Mul(midPrice)
+	quoteValue := balances.QuoteBalance.Amount.ToLegacyDec()
+	totalValue := baseValue.Add(quoteValue)
+
+	if !totalValue.IsPositive() {
+		return 0.5 // Default to balanced if no value
+	}
+
+	// Return ratio of base value to total value (0-1 range)
+	ratio := baseValue.Quo(totalValue)
+	ratioFloat, _ := ratio.Float64()
+
+	return ratioFloat
+}
+
+func (v *Orders) generateCLMMPrices(lowerBound, upperBound math.LegacyDec, numLevels int, concentrationFactor float64) []math.LegacyDec {
+	prices := []math.LegacyDec{}
+
+	if numLevels == 0 {
+		return prices
+	}
+
+	priceRange := upperBound.Sub(lowerBound)
+
+	for i := 0; i < numLevels; i++ {
+		// Linear position: 0 to 1
+		linearPos := float64(i) / float64(numLevels-1)
+
+		// Apply concentration curve
+		// Higher concentration = more prices near bounds
+		curvedPos := stdmath.Pow(linearPos, 1.0/concentrationFactor)
+
+		// Map to price range
+		offset := math.LegacyMustNewDecFromStr(fmt.Sprintf("%f", curvedPos))
+		price := lowerBound.Add(priceRange.Mul(offset))
+
+		prices = append(prices, price)
+	}
+
+	return prices
+}
+
+func (v *Orders) calculateCLMMLiquidity(
+	prices []math.LegacyDec,
+	midPrice math.LegacyDec,
+	inventoryRatio float64,
+	concentrationFactor float64,
+	minAmount, maxAmount math.Int,
+) []math.Int {
+	amounts := []math.Int{}
+
+	for _, price := range prices {
+		// 1. Base liquidity from concentration curve
+		distanceFromMid := price.Sub(midPrice).Abs().Quo(midPrice)
+		distanceFloat, _ := distanceFromMid.Float64()
+
+		// Exponential decay from mid-price
+		baseWeight := stdmath.Exp(-concentrationFactor * distanceFloat)
+
+		// 2. Apply balance skew adjustment
+		skewAdjustment := 1.0
+
+		// inventoryRatio: 0.5 = balanced, <0.5 = need more base, >0.5 = need more quote
+		imbalance := stdmath.Abs(inventoryRatio-0.5) * 2.0 // 0-1 range
+
+		if imbalance > 0.2 { // Only adjust if significantly imbalanced
+			// Make orders near mid-price fatter when imbalanced
+			proximityToMid := 1.0 - distanceFloat
+			skewBoost := 1.0 + (imbalance * proximityToMid * 2.0) // Up to 3x at mid when very skewed
+			skewAdjustment = skewBoost
+		}
+
+		// 3. Calculate final amount
+		finalWeight := baseWeight * skewAdjustment
+
+		// Map weight to amount range
+		amountRange := maxAmount.Sub(minAmount)
+		weightDec := math.LegacyMustNewDecFromStr(fmt.Sprintf("%f", finalWeight))
+		amountOffset := amountRange.ToLegacyDec().Mul(weightDec).TruncateInt()
+		amount := minAmount.Add(amountOffset)
+
+		// Ensure within bounds
+		if amount.LT(minAmount) {
+			amount = minAmount
+		}
+		if amount.GT(maxAmount) {
+			amount = maxAmount
+		}
+
+		amounts = append(amounts, amount)
+	}
+
+	return amounts
+}
+
+func (v *Orders) placeOrdersAtLevels(
+	prices []math.LegacyDec,
+	amounts []math.Int,
+	orderType string,
+	myOrders []tradebinTypes.Order,
+	marketOrders []tradebinTypes.AggregatedOrder,
+) error {
+	l := v.l.WithField("func", "placeOrdersAtLevels").WithField("order_type", orderType)
+
+	// Build map of existing prices
+	myPrices := make(map[string]bool)
+	for _, order := range myOrders {
+		priceDec := math.LegacyMustNewDecFromStr(order.Price)
+		myPrices[priceDec.String()] = true
+	}
+
+	ordersToCreate := []*tradebinTypes.MsgCreateOrder{}
+
+	for i, price := range prices {
+		priceStr := price.String()
+
+		// Skip if we already have an order at this price
+		if myPrices[priceStr] {
+			l.WithField("price", priceStr).Debug("already have order at this price, skipping")
+			continue
+		}
+
+		// Skip if there's already a market order at this price from someone else
+		hasMarketOrder := false
+		for _, marketOrder := range marketOrders {
+			marketPrice := math.LegacyMustNewDecFromStr(marketOrder.Price)
+			if marketPrice.Equal(price) {
+				hasMarketOrder = true
+				break
+			}
+		}
+
+		if hasMarketOrder {
+			l.WithField("price", priceStr).Debug("market already has order at this price, skipping")
+			continue
+		}
+
+		// Create order
+		amount := amounts[i]
+		msg := tradebinTypes.NewMsgCreateOrder(
+			v.addressProvider.GetAddress().String(),
+			orderType,
+			amount.String(),
+			priceStr,
+			v.marketConfig.GetMarketId(),
+		)
+
+		ordersToCreate = append(ordersToCreate, msg)
+
+		l.WithFields(map[string]interface{}{
+			"price":  priceStr,
+			"amount": amount.String(),
+		}).Debug("created order")
+	}
+
+	if len(ordersToCreate) > 0 {
+		err := v.orderSubmitter.AddOrders(ordersToCreate)
+		if err != nil {
+			return fmt.Errorf("failed to submit orders: %w", err)
+		}
+
+		l.WithField("count", len(ordersToCreate)).Info("submitted orders")
+	}
+
+	return nil
+}
+
+func (v *Orders) cancelOutOfRangeOrders(
+	lowerBound, upperBound math.LegacyDec,
+	myBuys, mySells []tradebinTypes.Order,
+) {
+	l := v.l.WithField("func", "cancelOutOfRangeOrders")
+
+	ordersToCancel := []*tradebinTypes.MsgCancelOrder{}
+
+	// Cancel buy orders below lower bound
+	for _, order := range myBuys {
+		orderPrice := math.LegacyMustNewDecFromStr(order.Price)
+		if orderPrice.LT(lowerBound) {
+			l.WithField("price", order.Price).Debug("cancelling buy order below range")
+			ordersToCancel = append(ordersToCancel, &tradebinTypes.MsgCancelOrder{
+				Creator: v.addressProvider.GetAddress().String(),
+				OrderId: order.Id,
+			})
+		}
+	}
+
+	// Cancel sell orders above upper bound
+	for _, order := range mySells {
+		orderPrice := math.LegacyMustNewDecFromStr(order.Price)
+		if orderPrice.GT(upperBound) {
+			l.WithField("price", order.Price).Debug("cancelling sell order above range")
+			ordersToCancel = append(ordersToCancel, &tradebinTypes.MsgCancelOrder{
+				Creator: v.addressProvider.GetAddress().String(),
+				OrderId: order.Id,
+			})
+		}
+	}
+
+	if len(ordersToCancel) > 0 {
+		err := v.orderSubmitter.CancelOrders(ordersToCancel)
+		if err != nil {
+			l.WithError(err).Error("failed to cancel out-of-range orders")
+		} else {
+			l.WithField("count", len(ordersToCancel)).Info("cancelled out-of-range orders")
+		}
+	}
 }
