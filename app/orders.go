@@ -224,10 +224,11 @@ func (v *Orders) fillOrderBookCLMM() error {
 	inventoryRatio := v.calculateInventoryRatio(balances, *midPrice)
 	l.WithField("inventory_ratio", inventoryRatio).Debug("calculated inventory ratio")
 
-	// Generate price levels
+	// Generate price levels with step snapping
 	concentrationFactor := v.ordersConfig.GetConcentrationFactor()
-	buyPrices := v.generateCLMMPrices(lowerBound, *midPrice, v.ordersConfig.GetBuyNo(), concentrationFactor)
-	sellPrices := v.generateCLMMPrices(*midPrice, upperBound, v.ordersConfig.GetSellNo(), concentrationFactor)
+	step := v.ordersConfig.GetPriceStepDec()
+	buyPrices := v.generateCLMMPrices(lowerBound, *midPrice, v.ordersConfig.GetBuyNo(), concentrationFactor, step)
+	sellPrices := v.generateCLMMPrices(*midPrice, upperBound, v.ordersConfig.GetSellNo(), concentrationFactor, step)
 
 	// Calculate liquidity amounts per price level
 	minAmount := v.ordersConfig.GetOrderMinAmount()
@@ -235,19 +236,44 @@ func (v *Orders) fillOrderBookCLMM() error {
 	buyAmounts := v.calculateCLMMLiquidity(buyPrices, *midPrice, inventoryRatio, concentrationFactor, *minAmount, *maxAmount)
 	sellAmounts := v.calculateCLMMLiquidity(sellPrices, *midPrice, inventoryRatio, concentrationFactor, *minAmount, *maxAmount)
 
-	// Place orders
-	err = v.placeOrdersAtLevels(buyPrices, buyAmounts, tradebinTypes.OrderTypeBuy, myBuys, buys)
+	// Collect all order creation messages
+	buyMsgs, err := v.placeOrdersAtLevels(buyPrices, buyAmounts, tradebinTypes.OrderTypeBuy, myBuys, buys)
 	if err != nil {
-		return fmt.Errorf("failed to place buy orders: %w", err)
+		return fmt.Errorf("failed to create buy orders: %w", err)
 	}
 
-	err = v.placeOrdersAtLevels(sellPrices, sellAmounts, tradebinTypes.OrderTypeSell, mySells, sells)
+	sellMsgs, err := v.placeOrdersAtLevels(sellPrices, sellAmounts, tradebinTypes.OrderTypeSell, mySells, sells)
 	if err != nil {
-		return fmt.Errorf("failed to place sell orders: %w", err)
+		return fmt.Errorf("failed to create sell orders: %w", err)
 	}
 
-	// Cancel orders outside range
-	v.cancelOutOfRangeOrders(lowerBound, upperBound, myBuys, mySells)
+	// Combine all create messages
+	allCreateMsgs := append(buyMsgs, sellMsgs...)
+
+	// Submit all creates in one transaction
+	if len(allCreateMsgs) > 0 {
+		err = v.orderSubmitter.AddOrders(allCreateMsgs)
+		if err != nil {
+			return fmt.Errorf("failed to submit orders: %w", err)
+		}
+		l.WithField("count", len(allCreateMsgs)).Info("submitted all orders in batch")
+	}
+
+	// Collect cancel messages
+	cancelMsgs := v.cancelOutOfRangeOrders(lowerBound, upperBound, myBuys, mySells)
+
+	// Wait for create transactions to be included in blocks before cancelling
+	if len(cancelMsgs) > 0 {
+		l.WithField("count", len(cancelMsgs)).Info("waiting 10 seconds before cancelling out-of-range orders")
+		time.Sleep(10 * time.Second)
+
+		err = v.orderSubmitter.CancelOrders(cancelMsgs)
+		if err != nil {
+			l.WithError(err).Error("failed to cancel out-of-range orders")
+		} else {
+			l.WithField("count", len(cancelMsgs)).Info("cancelled out-of-range orders")
+		}
+	}
 
 	l.Info("CLMM order book filled successfully")
 	return nil
@@ -550,8 +576,9 @@ func (v *Orders) calculateInventoryRatio(balances *dto.MarketBalance, midPrice m
 	return ratioFloat
 }
 
-func (v *Orders) generateCLMMPrices(lowerBound, upperBound math.LegacyDec, numLevels int, concentrationFactor float64) []math.LegacyDec {
+func (v *Orders) generateCLMMPrices(lowerBound, upperBound math.LegacyDec, numLevels int, concentrationFactor float64, step *math.LegacyDec) []math.LegacyDec {
 	prices := []math.LegacyDec{}
+	priceMap := make(map[string]bool) // Track unique prices after snapping
 
 	if numLevels == 0 {
 		return prices
@@ -559,9 +586,12 @@ func (v *Orders) generateCLMMPrices(lowerBound, upperBound math.LegacyDec, numLe
 
 	priceRange := upperBound.Sub(lowerBound)
 
-	for i := 0; i < numLevels; i++ {
+	// Generate more candidates than needed to account for duplicates after snapping
+	maxAttempts := numLevels * 3
+
+	for i := 0; i < maxAttempts && len(prices) < numLevels; i++ {
 		// Linear position: 0 to 1
-		linearPos := float64(i) / float64(numLevels-1)
+		linearPos := float64(i) / float64(maxAttempts-1)
 
 		// Apply concentration curve
 		// Higher concentration = more prices near bounds
@@ -569,9 +599,28 @@ func (v *Orders) generateCLMMPrices(lowerBound, upperBound math.LegacyDec, numLe
 
 		// Map to price range
 		offset := math.LegacyMustNewDecFromStr(fmt.Sprintf("%f", curvedPos))
-		price := lowerBound.Add(priceRange.Mul(offset))
+		rawPrice := lowerBound.Add(priceRange.Mul(offset))
 
-		prices = append(prices, price)
+		// Snap price to step intervals
+		snappedPrice, err := internal.TruncateToStep(&rawPrice, step)
+		if err != nil {
+			v.l.WithError(err).Debug("failed to truncate price to step, skipping")
+			continue
+		}
+
+		// Ensure price is within bounds
+		if snappedPrice.LT(lowerBound) || snappedPrice.GT(upperBound) {
+			continue
+		}
+
+		// Check for duplicates (after snapping, prices may collapse to same value)
+		priceStr := snappedPrice.String()
+		if priceMap[priceStr] {
+			continue
+		}
+
+		priceMap[priceStr] = true
+		prices = append(prices, *snappedPrice)
 	}
 
 	return prices
@@ -636,7 +685,7 @@ func (v *Orders) placeOrdersAtLevels(
 	orderType string,
 	myOrders []tradebinTypes.Order,
 	marketOrders []tradebinTypes.AggregatedOrder,
-) error {
+) ([]*tradebinTypes.MsgCreateOrder, error) {
 	l := v.l.WithField("func", "placeOrdersAtLevels").WithField("order_type", orderType)
 
 	// Build map of existing prices
@@ -687,25 +736,20 @@ func (v *Orders) placeOrdersAtLevels(
 		l.WithFields(map[string]interface{}{
 			"price":  priceStr,
 			"amount": amount.String(),
-		}).Debug("created order")
+		}).Debug("created order message")
 	}
 
 	if len(ordersToCreate) > 0 {
-		err := v.orderSubmitter.AddOrders(ordersToCreate)
-		if err != nil {
-			return fmt.Errorf("failed to submit orders: %w", err)
-		}
-
-		l.WithField("count", len(ordersToCreate)).Info("submitted orders")
+		l.WithField("count", len(ordersToCreate)).Debug("created order messages for batch submission")
 	}
 
-	return nil
+	return ordersToCreate, nil
 }
 
 func (v *Orders) cancelOutOfRangeOrders(
 	lowerBound, upperBound math.LegacyDec,
 	myBuys, mySells []tradebinTypes.Order,
-) {
+) []*tradebinTypes.MsgCancelOrder {
 	l := v.l.WithField("func", "cancelOutOfRangeOrders")
 
 	ordersToCancel := []*tradebinTypes.MsgCancelOrder{}
@@ -714,7 +758,7 @@ func (v *Orders) cancelOutOfRangeOrders(
 	for _, order := range myBuys {
 		orderPrice := math.LegacyMustNewDecFromStr(order.Price)
 		if orderPrice.LT(lowerBound) {
-			l.WithField("price", order.Price).Debug("cancelling buy order below range")
+			l.WithField("price", order.Price).Debug("marking buy order below range for cancellation")
 			ordersToCancel = append(ordersToCancel, &tradebinTypes.MsgCancelOrder{
 				Creator: v.addressProvider.GetAddress().String(),
 				OrderId: order.Id,
@@ -726,7 +770,7 @@ func (v *Orders) cancelOutOfRangeOrders(
 	for _, order := range mySells {
 		orderPrice := math.LegacyMustNewDecFromStr(order.Price)
 		if orderPrice.GT(upperBound) {
-			l.WithField("price", order.Price).Debug("cancelling sell order above range")
+			l.WithField("price", order.Price).Debug("marking sell order above range for cancellation")
 			ordersToCancel = append(ordersToCancel, &tradebinTypes.MsgCancelOrder{
 				Creator: v.addressProvider.GetAddress().String(),
 				OrderId: order.Id,
@@ -735,11 +779,8 @@ func (v *Orders) cancelOutOfRangeOrders(
 	}
 
 	if len(ordersToCancel) > 0 {
-		err := v.orderSubmitter.CancelOrders(ordersToCancel)
-		if err != nil {
-			l.WithError(err).Error("failed to cancel out-of-range orders")
-		} else {
-			l.WithField("count", len(ordersToCancel)).Info("cancelled out-of-range orders")
-		}
+		l.WithField("count", len(ordersToCancel)).Debug("created cancel messages for batch submission")
 	}
+
+	return ordersToCancel
 }

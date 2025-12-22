@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"tradebin-mm/app/internal"
 
@@ -102,10 +103,10 @@ func NewBroadcaster(l logrus.FieldLogger, tx txConfig, pk wallet, cp clientProvi
 }
 
 func (o *Broadcaster) BroadcastBlock(msgs []sdk.Msg) error {
-	return o.Broadcast(msgs, sdkTx.BroadcastMode_BROADCAST_MODE_SYNC)
+	return o.Broadcast(msgs, sdkTx.BroadcastMode_BROADCAST_MODE_SYNC, false)
 }
 
-func (o *Broadcaster) Broadcast(msgs []sdk.Msg, mode sdkTx.BroadcastMode) error {
+func (o *Broadcaster) Broadcast(msgs []sdk.Msg, mode sdkTx.BroadcastMode, isRetry bool) error {
 	// Lock to prevent concurrent broadcasts with sequence mismatch
 	o.mu.Lock()
 	defer o.mu.Unlock()
@@ -114,6 +115,9 @@ func (o *Broadcaster) Broadcast(msgs []sdk.Msg, mode sdkTx.BroadcastMode) error 
 		return fmt.Errorf("no messages to broadcast")
 	}
 
+	if isRetry {
+		o.l.Debug("retrying broadcast after sequence error")
+	}
 	o.l.Debugf("broadcasting messages: %v", msgs)
 
 	var sequence uint64
@@ -216,6 +220,15 @@ func (o *Broadcaster) Broadcast(msgs []sdk.Msg, mode sdkTx.BroadcastMode) error 
 	)
 	if err != nil {
 		o.sequenceValid = false
+
+		// Check if error is sequence-related and retry once
+		if !isRetry && strings.Contains(strings.ToLower(err.Error()), "sequence") {
+			o.l.WithError(err).Warn("sequence error detected during simulation, invalidating cache and retrying")
+			// Unlock before recursive call since Broadcast will lock again
+			o.mu.Unlock()
+			return o.Broadcast(msgs, mode, true)
+		}
+
 		return err
 	}
 	o.l.Debugf("simulated tx: %v", simulate.GasInfo)
