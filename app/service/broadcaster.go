@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 	"tradebin-mm/app/internal"
 
 	authv1beta1 "cosmossdk.io/api/cosmos/auth/v1beta1"
@@ -109,9 +110,9 @@ func (o *Broadcaster) BroadcastBlock(msgs []sdk.Msg) error {
 func (o *Broadcaster) Broadcast(msgs []sdk.Msg, mode sdkTx.BroadcastMode, isRetry bool) error {
 	// Lock to prevent concurrent broadcasts with sequence mismatch
 	o.mu.Lock()
-	defer o.mu.Unlock()
 
 	if len(msgs) == 0 {
+		o.mu.Unlock()
 		return fmt.Errorf("no messages to broadcast")
 	}
 
@@ -131,21 +132,25 @@ func (o *Broadcaster) Broadcast(msgs []sdk.Msg, mode sdkTx.BroadcastMode, isRetr
 	} else {
 		authCl, err := o.cp.GetAuthQueryClient()
 		if err != nil {
+			o.mu.Unlock()
 			return err
 		}
 
 		resp, err := authCl.Account(context.Background(), &authv1beta1.QueryAccountRequest{Address: o.pk.GetAddress().String()})
 		if err != nil {
+			o.mu.Unlock()
 			return err
 		}
 
 		acc := resp.GetAccount()
 		if acc == nil {
+			o.mu.Unlock()
 			return fmt.Errorf("account not found")
 		}
 
 		baseAcc := &authv1beta1.BaseAccount{}
 		if err := acc.UnmarshalTo(baseAcc); err != nil {
+			o.mu.Unlock()
 			return fmt.Errorf("failed to unmarshal account: %w", err)
 		}
 
@@ -159,6 +164,7 @@ func (o *Broadcaster) Broadcast(msgs []sdk.Msg, mode sdkTx.BroadcastMode, isRetr
 
 	err := txBuilder.SetMsgs(msgs...)
 	if err != nil {
+		o.mu.Unlock()
 		return err
 	}
 	txBuilder.SetMemo("")
@@ -174,6 +180,7 @@ func (o *Broadcaster) Broadcast(msgs []sdk.Msg, mode sdkTx.BroadcastMode, isRetr
 
 	err = txBuilder.SetSignatures(sigV2)
 	if err != nil {
+		o.mu.Unlock()
 		return err
 	}
 
@@ -193,21 +200,25 @@ func (o *Broadcaster) Broadcast(msgs []sdk.Msg, mode sdkTx.BroadcastMode, isRetr
 		sequence,
 	)
 	if err != nil {
+		o.mu.Unlock()
 		return err
 	}
 
 	err = txBuilder.SetSignatures(sigV2)
 	if err != nil {
+		o.mu.Unlock()
 		return err
 	}
 
 	txBytes, err := encCfg.TxConfig.TxEncoder()(txBuilder.GetTx())
 	if err != nil {
+		o.mu.Unlock()
 		return err
 	}
 
 	cl, err := o.cp.GetServiceClient()
 	if err != nil {
+		o.mu.Unlock()
 		return err
 	}
 
@@ -223,18 +234,21 @@ func (o *Broadcaster) Broadcast(msgs []sdk.Msg, mode sdkTx.BroadcastMode, isRetr
 
 		// Check if error is sequence-related and retry once
 		if !isRetry && strings.Contains(strings.ToLower(err.Error()), "sequence") {
-			o.l.WithError(err).Warn("sequence error detected during simulation, invalidating cache and retrying")
+			o.l.WithError(err).Warn("sequence error detected during simulation, invalidating cache and retrying after sleep...")
+			time.Sleep(3 * time.Second)
 			// Unlock before recursive call since Broadcast will lock again
 			o.mu.Unlock()
 			return o.Broadcast(msgs, mode, true)
 		}
 
+		o.mu.Unlock()
 		return err
 	}
 	o.l.Debugf("simulated tx: %v", simulate.GasInfo)
 
 	fee, err := getFee(simulate.GasInfo.GasUsed, o.tx.GetGasPrices())
 	if err != nil {
+		o.mu.Unlock()
 		return err
 	}
 	o.l.WithField("fee", fee).Debug("calculated fee")
@@ -253,16 +267,19 @@ func (o *Broadcaster) Broadcast(msgs []sdk.Msg, mode sdkTx.BroadcastMode, isRetr
 		sequence,
 	)
 	if err != nil {
+		o.mu.Unlock()
 		return err
 	}
 
 	err = txBuilder.SetSignatures(sigV2)
 	if err != nil {
+		o.mu.Unlock()
 		return err
 	}
 
 	txBytes, err = encCfg.TxConfig.TxEncoder()(txBuilder.GetTx())
 	if err != nil {
+		o.mu.Unlock()
 		return err
 	}
 
@@ -276,20 +293,23 @@ func (o *Broadcaster) Broadcast(msgs []sdk.Msg, mode sdkTx.BroadcastMode, isRetr
 	)
 
 	if err != nil {
+		o.mu.Unlock()
 		return err
 	}
 
 	if grpcRes.TxResponse.Code != 0 {
 		// Invalidate cached sequence on error
 		o.sequenceValid = false
+		o.mu.Unlock()
 		return fmt.Errorf("failed to broadcast tx: %v", grpcRes)
-	} else {
-		o.l.Infof("broadcasted tx: %v", grpcRes.TxResponse.TxHash)
-		// Update cached sequence for next transaction
-		o.cachedSequence = sequence + 1
-		o.accountNumber = accountNumber
-		o.sequenceValid = true
 	}
+
+	o.l.Infof("broadcasted tx: %v", grpcRes.TxResponse.TxHash)
+	// Update cached sequence for next transaction
+	o.cachedSequence = sequence + 1
+	o.accountNumber = accountNumber
+	o.sequenceValid = true
+	o.mu.Unlock()
 
 	return nil
 }

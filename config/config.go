@@ -71,6 +71,11 @@ type Volume struct {
 	HoldBack             int     `yaml:"hold_back_interval"`
 	InventorySkewEnabled bool    `yaml:"inventory_skew_enabled"`
 	InventorySkew        float64 `yaml:"inventory_skew"`
+
+	// Liquidity pool integration
+	UseLiquidityPool  bool    `yaml:"use_liquidity_pool"`
+	LpTolerance       float64 `yaml:"lp_tolerance"`
+	LpRebalanceAmount float64 `yaml:"lp_rebalance_amount"`
 }
 
 func (v *Volume) GetMin() int64 {
@@ -111,6 +116,18 @@ func (v *Volume) GetInventorySkew() float64 {
 	return v.InventorySkew
 }
 
+func (v *Volume) GetUseLiquidityPool() bool {
+	return v.UseLiquidityPool
+}
+
+func (v *Volume) GetLpTolerance() float64 {
+	return v.LpTolerance
+}
+
+func (v *Volume) GetLpRebalanceAmount() float64 {
+	return v.LpRebalanceAmount
+}
+
 func (v *Volume) Validate() error {
 	if v.Min <= 0 {
 		return NewConfigError("min is required")
@@ -139,6 +156,16 @@ func (v *Volume) Validate() error {
 	if v.InventorySkewEnabled {
 		if v.InventorySkew <= 0 || v.InventorySkew > 1 {
 			return NewConfigError("inventory_skew must be between 0 and 1 when enabled")
+		}
+	}
+
+	// Liquidity pool validation
+	if v.UseLiquidityPool {
+		if v.LpTolerance <= 0 {
+			return NewConfigError("lp_tolerance must be greater than 0 when use_liquidity_pool is enabled")
+		}
+		if v.LpRebalanceAmount <= 0 || v.LpRebalanceAmount > 1 {
+			return NewConfigError("lp_rebalance_amount must be between 0 and 1 when use_liquidity_pool is enabled")
 		}
 	}
 

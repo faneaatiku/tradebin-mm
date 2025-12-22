@@ -49,6 +49,11 @@ volume:
     hold_back_interval: 300 # the number of seconds to wait when other trades happen (excluding self trades), before making volume
     inventory_skew_enabled: false # enable inventory skew to automatically balance base/quote assets
     inventory_skew: 0.3 # inventory skew multiplier (0-1): higher values = more aggressive rebalancing. Recommended: 0.3
+
+    # Liquidity pool integration - Use AMM pools for price reference and rebalancing
+    use_liquidity_pool: false # enable LP integration for spot price reference and automated rebalancing
+    lp_tolerance: 2.0 # percentage tolerance for volume orders from LP spot price (e.g., 2.0 = ±2%)
+    lp_rebalance_amount: 0.3 # percentage of imbalanced asset to swap when rebalancing (0-1). Recommended: 0.3
 wallet:
     mnemonic: "your SUPER SECRET mnemonic" # the mnemonic of the wallet
 client:

@@ -36,6 +36,16 @@ type ordersProvider interface {
 type orderSubmitter interface {
 	CancelOrders([]*tradebinTypes.MsgCancelOrder) error
 	AddOrders([]*tradebinTypes.MsgCreateOrder) error
+	FillOrders(*tradebinTypes.MsgFillOrders) error
+}
+
+type ordersVolumeConfig interface {
+	GetUseLiquidityPool() bool
+}
+
+type ordersLiquidityPoolProvider interface {
+	GetPool(poolId string) (*tradebinTypes.LiquidityPool, error)
+	GetSpotPrice(pool *tradebinTypes.LiquidityPool) (*math.LegacyDec, error)
 }
 
 type ordersConfig interface {
@@ -59,6 +69,7 @@ type ordersConfig interface {
 
 type Orders struct {
 	ordersConfig ordersConfig
+	volumeConfig ordersVolumeConfig
 	marketConfig data_provider.MarketProvider
 
 	balanceProvider balanceProvider
@@ -66,29 +77,41 @@ type Orders struct {
 	ordersProvider  ordersProvider
 	orderSubmitter  orderSubmitter
 
+	// Liquidity pool integration
+	lpProvider ordersLiquidityPoolProvider
+
 	l logrus.FieldLogger
 }
 
 func NewOrdersFiller(
 	l logrus.FieldLogger,
 	ordersConfig ordersConfig,
+	volumeConfig ordersVolumeConfig,
 	marketConfig data_provider.MarketProvider,
 	balanceProvider balanceProvider,
 	addressProvider addressProvider,
 	ordersProvider ordersProvider,
 	orderSubmitter orderSubmitter,
+	lpProvider ordersLiquidityPoolProvider,
 ) (*Orders, error) {
-	if ordersConfig == nil || marketConfig == nil || balanceProvider == nil || addressProvider == nil || ordersProvider == nil || orderSubmitter == nil {
+	if ordersConfig == nil || volumeConfig == nil || marketConfig == nil || balanceProvider == nil || addressProvider == nil || ordersProvider == nil || orderSubmitter == nil {
 		return nil, internal.NewInvalidDependenciesErr("NewOrdersFiller")
+	}
+
+	// LP provider is optional - only required if use_liquidity_pool is enabled
+	if volumeConfig.GetUseLiquidityPool() && lpProvider == nil {
+		return nil, internal.NewInvalidDependenciesErr("NewOrdersFiller: LP provider required when use_liquidity_pool is enabled")
 	}
 
 	return &Orders{
 		ordersConfig:    ordersConfig,
+		volumeConfig:    volumeConfig,
 		marketConfig:    marketConfig,
 		balanceProvider: balanceProvider,
 		addressProvider: addressProvider,
 		ordersProvider:  ordersProvider,
 		orderSubmitter:  orderSubmitter,
+		lpProvider:      lpProvider,
 		l:               l.WithField("service", "OrdersFiller"),
 	}, nil
 }
@@ -200,11 +223,62 @@ func (v *Orders) fillOrderBookCLMM() error {
 		return err
 	}
 
-	// Calculate mid-price
-	midPrice := v.calculateMidPrice(buys, sells)
-	if midPrice == nil {
-		l.Info("no mid-price available, using start price")
+	// Calculate mid-price from order book
+	orderBookMidPrice := v.calculateMidPrice(buys, sells)
+
+	// Get LP spot price if enabled
+	var lpSpotPrice *math.LegacyDec
+	if v.volumeConfig.GetUseLiquidityPool() && v.lpProvider != nil {
+		poolId := data_provider.GeneratePoolId(
+			v.marketConfig.GetBaseDenom(),
+			v.marketConfig.GetQuoteDenom(),
+		)
+
+		pool, err := v.lpProvider.GetPool(poolId)
+		if err != nil {
+			l.WithError(err).Warn("failed to get LP for CLMM mid-price")
+		} else if pool != nil {
+			spotPrice, err := v.lpProvider.GetSpotPrice(pool)
+			if err != nil {
+				l.WithError(err).Warn("failed to calculate LP spot price for CLMM")
+			} else {
+				lpSpotPrice = spotPrice
+				l.WithField("lp_spot_price", lpSpotPrice.String()).Debug("fetched LP spot price for CLMM")
+			}
+		}
+	}
+
+	// Select mid-price: use MINIMUM of LP spot price vs order book mid-price
+	var midPrice *math.LegacyDec
+	if orderBookMidPrice != nil && lpSpotPrice != nil {
+		// Both exist - use the SMALLER one
+		if lpSpotPrice.LT(*orderBookMidPrice) {
+			midPrice = lpSpotPrice
+			l.WithFields(map[string]interface{}{
+				"lp_spot_price":       lpSpotPrice.String(),
+				"orderbook_mid_price": orderBookMidPrice.String(),
+				"selected":            "lp_spot_price (smaller)",
+			}).Info("using LP spot price (smaller than order book mid-price)")
+		} else {
+			midPrice = orderBookMidPrice
+			l.WithFields(map[string]interface{}{
+				"lp_spot_price":       lpSpotPrice.String(),
+				"orderbook_mid_price": orderBookMidPrice.String(),
+				"selected":            "orderbook_mid_price (smaller)",
+			}).Info("using order book mid-price (smaller than LP spot price)")
+		}
+	} else if lpSpotPrice != nil {
+		// Only LP exists
+		midPrice = lpSpotPrice
+		l.WithField("lp_spot_price", lpSpotPrice.String()).Info("using LP spot price (no order book)")
+	} else if orderBookMidPrice != nil {
+		// Only order book exists
+		midPrice = orderBookMidPrice
+		l.WithField("orderbook_mid_price", orderBookMidPrice.String()).Info("using order book mid-price (no LP)")
+	} else {
+		// Neither exists - fallback to config
 		midPrice = v.ordersConfig.GetStartPriceDec()
+		l.WithField("start_price", midPrice.String()).Info("using config start price (no LP or order book)")
 	}
 
 	l.WithField("mid_price", midPrice.String()).Debug("calculated mid-price")
@@ -419,7 +493,28 @@ func (v *Orders) getStartPrice(marketId string, biggestBuy *math.LegacyDec, smal
 
 func (v *Orders) getStartPriceFromSpread(biggestBuy *math.LegacyDec, smallestSell *math.LegacyDec) *math.LegacyDec {
 	if biggestBuy.IsZero() && smallestSell.IsZero() {
-		//start from configured price
+		// Priority 1: Try LP spot price if enabled
+		if v.volumeConfig.GetUseLiquidityPool() && v.lpProvider != nil {
+			poolId := data_provider.GeneratePoolId(
+				v.marketConfig.GetBaseDenom(),
+				v.marketConfig.GetQuoteDenom(),
+			)
+
+			pool, err := v.lpProvider.GetPool(poolId)
+			if err != nil {
+				v.l.WithError(err).Warn("failed to get LP for start price")
+			} else if pool != nil {
+				spotPrice, err := v.lpProvider.GetSpotPrice(pool)
+				if err != nil {
+					v.l.WithError(err).Warn("failed to calculate LP spot price")
+				} else {
+					v.l.WithField("price", spotPrice.String()).Info("using LP spot price as start price")
+					return spotPrice
+				}
+			}
+		}
+
+		// Priority 2: Fallback to configured price
 		return v.ordersConfig.GetStartPriceDec()
 	}
 
@@ -759,10 +854,13 @@ func (v *Orders) cancelOutOfRangeOrders(
 		orderPrice := math.LegacyMustNewDecFromStr(order.Price)
 		if orderPrice.LT(lowerBound) {
 			l.WithField("price", order.Price).Debug("marking buy order below range for cancellation")
-			ordersToCancel = append(ordersToCancel, &tradebinTypes.MsgCancelOrder{
-				Creator: v.addressProvider.GetAddress().String(),
-				OrderId: order.Id,
-			})
+			msg := tradebinTypes.NewMsgCancelOrder(
+				v.addressProvider.GetAddress().String(),
+				order.MarketId,
+				order.Id,
+				order.OrderType,
+			)
+			ordersToCancel = append(ordersToCancel, msg)
 		}
 	}
 
@@ -771,10 +869,13 @@ func (v *Orders) cancelOutOfRangeOrders(
 		orderPrice := math.LegacyMustNewDecFromStr(order.Price)
 		if orderPrice.GT(upperBound) {
 			l.WithField("price", order.Price).Debug("marking sell order above range for cancellation")
-			ordersToCancel = append(ordersToCancel, &tradebinTypes.MsgCancelOrder{
-				Creator: v.addressProvider.GetAddress().String(),
-				OrderId: order.Id,
-			})
+			msg := tradebinTypes.NewMsgCancelOrder(
+				v.addressProvider.GetAddress().String(),
+				order.MarketId,
+				order.Id,
+				order.OrderType,
+			)
+			ordersToCancel = append(ordersToCancel, msg)
 		}
 	}
 

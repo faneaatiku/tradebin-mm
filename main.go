@@ -137,7 +137,7 @@ func cancelOrders(cfg *config.Config, l logrus.FieldLogger) {
 		log.Fatalf("could not create broadcaster: %v", err)
 	}
 
-	oService, err := service.NewOrderService(l, broadcaster)
+	oService, err := service.NewOrderService(l, broadcaster, w)
 	if err != nil {
 		log.Fatalf("could not create order service: %v", err)
 	}
@@ -181,9 +181,18 @@ func startMarketMaking(cfg *config.Config, l logrus.FieldLogger) {
 		log.Fatalf("could not create broadcaster: %v", err)
 	}
 
-	oService, err := service.NewOrderService(l, broadcaster)
+	oService, err := service.NewOrderService(l, broadcaster, w)
 	if err != nil {
 		log.Fatalf("could not create order service: %v", err)
+	}
+
+	// Create LP provider if LP integration is enabled
+	var lpProvider *data_provider.LiquidityPoolProvider
+	if cfg.Volume.GetUseLiquidityPool() {
+		lpProvider, err = data_provider.NewLiquidityPoolProvider(grpc, l)
+		if err != nil {
+			log.Fatalf("could not create liquidity pool provider: %v", err)
+		}
 	}
 
 	volume, err := app.NewVolumeMaker(
@@ -196,6 +205,8 @@ func startMarketMaking(cfg *config.Config, l logrus.FieldLogger) {
 		oService,
 		lock.GetInMemoryLocker(),
 		&cfg.Orders,
+		lpProvider,
+		oService,
 	)
 	if err != nil {
 		log.Fatalf("could not create volume maker: %v", err)
@@ -204,11 +215,13 @@ func startMarketMaking(cfg *config.Config, l logrus.FieldLogger) {
 	orders, err := app.NewOrdersFiller(
 		l,
 		&cfg.Orders,
+		&cfg.Volume,
 		&cfg.Market,
 		balances,
 		w,
 		orderData,
 		oService,
+		lpProvider,
 	)
 
 	if err != nil {

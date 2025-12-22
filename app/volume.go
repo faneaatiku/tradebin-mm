@@ -34,6 +34,18 @@ type volumeConfig interface {
 	GetHoldBackSeconds() int
 	GetInventorySkewEnabled() bool
 	GetInventorySkew() float64
+	GetUseLiquidityPool() bool
+	GetLpTolerance() float64
+	GetLpRebalanceAmount() float64
+}
+
+type liquidityPoolProvider interface {
+	GetPool(poolId string) (*tradebinTypes.LiquidityPool, error)
+	GetSpotPrice(pool *tradebinTypes.LiquidityPool) (*math.LegacyDec, error)
+}
+
+type lpSwapper interface {
+	SwapToPool(poolId string, inputDenom string, inputAmount math.Int, outputDenom string, minOutputAmount math.Int) error
 }
 
 type volumeStrategy interface {
@@ -68,6 +80,10 @@ type Volume struct {
 	balanceProvider balanceProvider
 	orderSubmitter  orderSubmitter
 
+	// Liquidity pool integration
+	lpProvider liquidityPoolProvider
+	lpSwapper  lpSwapper
+
 	l logrus.FieldLogger
 }
 
@@ -81,9 +97,18 @@ func NewVolumeMaker(
 	orderSubmitter orderSubmitter,
 	locker locker,
 	orderConfig volumeOrderConfig,
+	lpProvider liquidityPoolProvider,
+	lpSwapper lpSwapper,
 ) (*Volume, error) {
 	if cfg == nil || marketConfig == nil || balanceProvider == nil || addressProvider == nil || ordersProvider == nil || orderSubmitter == nil || l == nil || locker == nil || orderConfig == nil {
 		return nil, internal.NewInvalidDependenciesErr("NewVolumeMaker")
+	}
+
+	// LP providers are optional - only required if use_liquidity_pool is enabled
+	if cfg.GetUseLiquidityPool() {
+		if lpProvider == nil || lpSwapper == nil {
+			return nil, internal.NewInvalidDependenciesErr("NewVolumeMaker: LP providers required when use_liquidity_pool is enabled")
+		}
 	}
 
 	return &Volume{
@@ -96,6 +121,8 @@ func NewVolumeMaker(
 		l:               l,
 		locker:          locker,
 		orderConfig:     orderConfig,
+		lpProvider:      lpProvider,
+		lpSwapper:       lpSwapper,
 	}, nil
 }
 
@@ -120,6 +147,50 @@ func (v *Volume) MakeVolume() error {
 	buys, sells, err := v.ordersProvider.GetActiveOrders(balances)
 	if err != nil {
 		return fmt.Errorf("failed to get active orders: %w", err)
+	}
+
+	// Liquidity pool integration: query LP and rebalance if needed
+	var spotPrice *math.LegacyDec
+	if v.cfg.GetUseLiquidityPool() {
+		poolId := data_provider.GeneratePoolId(
+			v.marketConfig.GetBaseDenom(),
+			v.marketConfig.GetQuoteDenom(),
+		)
+
+		pool, err := v.lpProvider.GetPool(poolId)
+		if err != nil {
+			l.WithError(err).Error("failed to get LP")
+			// Continue without LP (graceful degradation)
+		} else if pool == nil {
+			l.Warn("LP integration enabled but pool not found, continuing without LP")
+			// Continue without LP (graceful degradation)
+		} else {
+			spotPrice, err = v.lpProvider.GetSpotPrice(pool)
+			if err != nil {
+				l.WithError(err).Error("failed to calculate LP spot price")
+			} else {
+				l.WithField("spot_price", spotPrice).Info("fetched LP spot price")
+
+				// Check if rebalancing needed
+				if v.cfg.GetInventorySkewEnabled() && v.shouldRebalanceToLP(balances, *spotPrice) {
+					l.Info("inventory imbalance detected, rebalancing via LP swap")
+					err := v.rebalanceViaLP(pool, poolId, balances, *spotPrice)
+					if err != nil {
+						l.WithError(err).Error("failed to rebalance via LP")
+					} else {
+						l.Info("successfully rebalanced via LP, refreshing balances")
+						// Refresh balances after swap
+						balances, err = v.balanceProvider.GetMarketBalance(
+							v.addressProvider.GetAddress().String(),
+							v.marketConfig,
+						)
+						if err != nil {
+							return fmt.Errorf("failed to refresh balances: %w", err)
+						}
+					}
+				}
+			}
+		}
 	}
 
 	strategy, err := v.getStrategy(balances, buys, sells)
@@ -159,6 +230,24 @@ func (v *Volume) MakeVolume() error {
 		}
 	}
 
+	// Check if order book price is outside LP tolerance - if so, create strategic order
+	if v.cfg.GetUseLiquidityPool() && spotPrice != nil && len(buys) > 0 && len(sells) > 0 {
+		highestBuy := math.LegacyMustNewDecFromStr(buys[0].Price)
+		lowestSell := math.LegacyMustNewDecFromStr(sells[0].Price)
+		midPrice := highestBuy.Add(lowestSell).Quo(math.LegacyNewDec(2))
+
+		if !v.validatePriceTolerance(midPrice, *spotPrice) {
+			l.WithFields(map[string]interface{}{
+				"mid_price":  midPrice.String(),
+				"spot_price": spotPrice.String(),
+				"tolerance":  v.cfg.GetLpTolerance(),
+			}).Info("order book price outside LP tolerance, creating strategic order to push toward LP")
+
+			return v.createStrategicOrderToLP(midPrice, *spotPrice, balances, buys, sells)
+		}
+	}
+
+	// Order book price is within tolerance or LP not enabled - use normal volume strategy
 	order, orderAmount, msgs := v.makeOrder(strategy, buys, sells, balances)
 	if order == nil || !orderAmount.IsPositive() || len(msgs) == 0 {
 		return nil
@@ -602,4 +691,286 @@ func (v *Volume) makeBaseStrategy(orderType string, myOrders []tradebinTypes.Ord
 
 func (v *Volume) isCarouselStrategy(strategyType string) bool {
 	return strategyType == dto.CarouselType
+}
+
+// shouldRebalanceToLP checks if inventory is skewed enough to trigger LP swap
+// Uses existing inventory_skew config as threshold
+func (v *Volume) shouldRebalanceToLP(balances *dto.MarketBalance, spotPrice math.LegacyDec) bool {
+	baseValue := balances.BaseBalance.Amount.ToLegacyDec().Mul(spotPrice)
+	quoteValue := balances.QuoteBalance.Amount.ToLegacyDec()
+	totalValue := baseValue.Add(quoteValue)
+
+	if !totalValue.IsPositive() {
+		return false
+	}
+
+	inventoryRatio := baseValue.Quo(totalValue) // 0-1 range, 0.5 = balanced
+	threshold := v.cfg.GetInventorySkew()       // Reuse inventory_skew config
+
+	// Trigger if > (0.5 + threshold) or < (0.5 - threshold)
+	upperLimit := math.LegacyMustNewDecFromStr(fmt.Sprintf("%f", 0.5+threshold))
+	lowerLimit := math.LegacyMustNewDecFromStr(fmt.Sprintf("%f", 0.5-threshold))
+
+	return inventoryRatio.GT(upperLimit) || inventoryRatio.LT(lowerLimit)
+}
+
+// rebalanceViaLP swaps imbalanced asset to LP to restore balance
+// Swaps user-configurable % of imbalanced asset
+func (v *Volume) rebalanceViaLP(
+	pool *tradebinTypes.LiquidityPool,
+	poolId string,
+	balances *dto.MarketBalance,
+	spotPrice math.LegacyDec,
+) error {
+	baseValue := balances.BaseBalance.Amount.ToLegacyDec().Mul(spotPrice)
+	quoteValue := balances.QuoteBalance.Amount.ToLegacyDec()
+	totalValue := baseValue.Add(quoteValue)
+	inventoryRatio := baseValue.Quo(totalValue)
+
+	var inputDenom string
+	var inputAmount math.Int
+	var outputDenom string
+
+	rebalancePercent := v.cfg.GetLpRebalanceAmount() // User configurable %
+
+	if inventoryRatio.GT(math.LegacyMustNewDecFromStr("0.5")) {
+		// Too much base, swap base → quote
+		inputDenom = v.marketConfig.GetBaseDenom()
+		inputAmount = balances.BaseBalance.Amount.ToLegacyDec().Mul(
+			math.LegacyMustNewDecFromStr(fmt.Sprintf("%f", rebalancePercent)),
+		).TruncateInt()
+		outputDenom = v.marketConfig.GetQuoteDenom()
+	} else {
+		// Too much quote, swap quote → base
+		inputDenom = v.marketConfig.GetQuoteDenom()
+		inputAmount = balances.QuoteBalance.Amount.ToLegacyDec().Mul(
+			math.LegacyMustNewDecFromStr(fmt.Sprintf("%f", rebalancePercent)),
+		).TruncateInt()
+		outputDenom = v.marketConfig.GetBaseDenom()
+	}
+
+	// Calculate expected output using constant product formula
+	expectedOutput := v.calculateExpectedSwapOutput(pool, inputDenom, inputAmount)
+
+	// Apply 2% slippage tolerance for min output
+	minOutput := expectedOutput.Mul(math.LegacyMustNewDecFromStr("0.98")).TruncateInt()
+
+	v.l.WithFields(map[string]interface{}{
+		"input_denom":  inputDenom,
+		"input_amount": inputAmount.String(),
+		"output_denom": outputDenom,
+		"min_output":   minOutput.String(),
+		"pool_id":      poolId,
+	}).Info("executing LP swap for rebalancing")
+
+	return v.lpSwapper.SwapToPool(poolId, inputDenom, inputAmount, outputDenom, minOutput)
+}
+
+// calculateExpectedSwapOutput calculates expected output using constant product formula
+// Formula: outputAmount = reserveOut - (reserveIn * reserveOut) / (reserveIn + inputAmount * (1 - fee))
+func (v *Volume) calculateExpectedSwapOutput(
+	pool *tradebinTypes.LiquidityPool,
+	inputDenom string,
+	inputAmount math.Int,
+) math.LegacyDec {
+	var reserveIn, reserveOut math.Int
+
+	if inputDenom == pool.Base {
+		reserveIn = pool.ReserveBase
+		reserveOut = pool.ReserveQuote
+	} else {
+		reserveIn = pool.ReserveQuote
+		reserveOut = pool.ReserveBase
+	}
+
+	// Calculate with fee
+	fee := pool.Fee // e.g., 0.003 for 0.3%
+	inputAfterFee := inputAmount.ToLegacyDec().Mul(
+		math.LegacyOneDec().Sub(fee),
+	)
+
+	newReserveIn := reserveIn.ToLegacyDec().Add(inputAfterFee)
+	constantProduct := reserveIn.ToLegacyDec().Mul(reserveOut.ToLegacyDec())
+	newReserveOut := constantProduct.Quo(newReserveIn)
+
+	expectedOutput := reserveOut.ToLegacyDec().Sub(newReserveOut)
+
+	return expectedOutput
+}
+
+// validatePriceTolerance checks if order price is within acceptable range of LP spot price
+// Returns false if outside tolerance
+func (v *Volume) validatePriceTolerance(orderPrice, lpSpotPrice math.LegacyDec) bool {
+	tolerance := v.cfg.GetLpTolerance() / 100.0 // Convert % to decimal
+	toleranceDec := math.LegacyMustNewDecFromStr(fmt.Sprintf("%f", tolerance))
+
+	upperBound := lpSpotPrice.Mul(math.LegacyOneDec().Add(toleranceDec))
+	lowerBound := lpSpotPrice.Mul(math.LegacyOneDec().Sub(toleranceDec))
+
+	withinTolerance := orderPrice.GTE(lowerBound) && orderPrice.LTE(upperBound)
+
+	if !withinTolerance {
+		v.l.WithFields(map[string]interface{}{
+			"order_price":   orderPrice.String(),
+			"spot_price":    lpSpotPrice.String(),
+			"lower_bound":   lowerBound.String(),
+			"upper_bound":   upperBound.String(),
+			"tolerance_pct": v.cfg.GetLpTolerance(),
+		}).Debug("price tolerance check failed")
+	}
+
+	return withinTolerance
+}
+
+// createStrategicOrderToLP fills existing orders to push the order book price toward LP spot price
+// when they diverge beyond tolerance. This creates volume while arbitraging the price gap.
+func (v *Volume) createStrategicOrderToLP(
+	midPrice, lpSpotPrice math.LegacyDec,
+	balances *dto.MarketBalance,
+	buys, sells []tradebinTypes.AggregatedOrder,
+) error {
+	l := v.l.WithField("func", "createStrategicOrderToLP")
+
+	var orderType string // Type of orders we're FILLING (not the action we're taking)
+	var ordersToFill []tradebinTypes.AggregatedOrder
+
+	// Determine which orders to fill based on divergence direction
+	if midPrice.GT(lpSpotPrice) {
+		// Order book price too high - fill BUY orders (sell to buyers) to push down
+		orderType = tradebinTypes.OrderTypeBuy // Filling BUY orders
+		ordersToFill = buys
+	} else {
+		// Order book price too low - fill SELL orders (buy from sellers) to push up
+		orderType = tradebinTypes.OrderTypeSell // Filling SELL orders
+		ordersToFill = sells
+	}
+
+	if len(ordersToFill) == 0 {
+		l.Warn("no orders available to fill for strategic trade")
+		return nil
+	}
+
+	// Build list of orders to fill - fill each ENTIRE order starting from best price
+	// Stop when we reach LP price OR can't afford the next order
+	var fillItems []*tradebinTypes.FillOrderItem
+	remainingBase := balances.BaseBalance.Amount
+	remainingQuote := balances.QuoteBalance.Amount
+
+	for _, order := range ordersToFill {
+		orderAmount, _ := math.NewIntFromString(order.Amount)
+		price, _ := math.LegacyNewDecFromStr(order.Price)
+
+		// Stop if this order's price has crossed the LP target
+		if midPrice.GT(lpSpotPrice) {
+			// Filling BUY orders (pushing price down toward LP) - stop if price goes below LP
+			if price.LT(lpSpotPrice) {
+				l.WithFields(map[string]interface{}{
+					"order_price": price.String(),
+					"lp_price":    lpSpotPrice.String(),
+				}).Debug("strategic fill: reached LP price target, stopping")
+				break
+			}
+		} else {
+			// Filling SELL orders (pushing price up toward LP) - stop if price goes above LP
+			if price.GT(lpSpotPrice) {
+				l.WithFields(map[string]interface{}{
+					"order_price": price.String(),
+					"lp_price":    lpSpotPrice.String(),
+				}).Debug("strategic fill: reached LP price target, stopping")
+				break
+			}
+		}
+
+		// Check if we can afford this ENTIRE order
+		var canAfford bool
+		if orderType == tradebinTypes.OrderTypeBuy {
+			// Filling BUY orders (selling) - need base currency
+			canAfford = orderAmount.LTE(remainingBase)
+		} else {
+			// Filling SELL orders (buying) - need quote currency
+			cost := price.Mul(orderAmount.ToLegacyDec()).TruncateInt()
+			canAfford = cost.LTE(remainingQuote)
+		}
+
+		if !canAfford {
+			// Can't afford this entire order, stop here
+			l.WithFields(map[string]interface{}{
+				"price":           order.Price,
+				"order_amount":    orderAmount.String(),
+				"remaining_base":  remainingBase.String(),
+				"remaining_quote": remainingQuote.String(),
+			}).Debug("strategic fill: insufficient balance for this entire order, stopping")
+			break
+		}
+
+		// Add this entire order to fill list
+		fillItems = append(fillItems, &tradebinTypes.FillOrderItem{
+			Price:  order.Price,
+			Amount: orderAmount.String(),
+		})
+
+		// Deduct from available balance
+		if orderType == tradebinTypes.OrderTypeBuy {
+			remainingBase = remainingBase.Sub(orderAmount)
+		} else {
+			cost := price.Mul(orderAmount.ToLegacyDec()).TruncateInt()
+			remainingQuote = remainingQuote.Sub(cost)
+		}
+
+		l.WithFields(map[string]interface{}{
+			"price":           order.Price,
+			"order_amount":    orderAmount.String(),
+			"filled_entirely": true,
+			"remaining_base":  remainingBase.String(),
+			"remaining_quote": remainingQuote.String(),
+		}).Debug("strategic fill: added entire order to fill list")
+	}
+
+	if len(fillItems) == 0 {
+		l.Warn("no fill items created for strategic trade")
+		return nil
+	}
+
+	// Calculate total amount being filled for logging
+	totalFilled := math.ZeroInt()
+	totalCost := math.ZeroInt()
+	for _, item := range fillItems {
+		amt, _ := math.NewIntFromString(item.Amount)
+		totalFilled = totalFilled.Add(amt)
+
+		if orderType == tradebinTypes.OrderTypeSell {
+			// Calculate total cost when buying
+			price, _ := math.LegacyNewDecFromStr(item.Price)
+			cost := price.Mul(amt.ToLegacyDec()).TruncateInt()
+			totalCost = totalCost.Add(cost)
+		}
+	}
+
+	logFields := map[string]interface{}{
+		"order_type":   orderType,
+		"fill_count":   len(fillItems),
+		"total_amount": totalFilled.String(),
+		"mid_price":    midPrice.String(),
+		"lp_price":     lpSpotPrice.String(),
+	}
+	if orderType == tradebinTypes.OrderTypeSell {
+		logFields["total_cost"] = totalCost.String()
+	}
+
+	l.WithFields(logFields).Info("creating AGGRESSIVE strategic fill to align order book with LP (using max available balance)")
+
+	msg := tradebinTypes.NewMsgFillOrders(
+		v.addressProvider.GetAddress().String(),
+		v.marketConfig.GetMarketId(),
+		orderType,
+		fillItems,
+	)
+
+	err := v.orderSubmitter.FillOrders(msg)
+	if err != nil {
+		return fmt.Errorf("failed to submit strategic fill order: %w", err)
+	}
+
+	l.Info("strategic fill order submitted successfully")
+	return nil
 }
