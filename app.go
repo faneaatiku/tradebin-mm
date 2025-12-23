@@ -2,8 +2,9 @@ package main
 
 import (
 	"fmt"
-	"github.com/sirupsen/logrus"
 	"time"
+
+	"github.com/sirupsen/logrus"
 )
 
 const (
@@ -11,11 +12,11 @@ const (
 )
 
 type marketFiller interface {
-	FillOrderBook() error
+	FillOrderBook() (time.Duration, error)
 }
 
 type volumeMaker interface {
-	MakeVolume() error
+	MakeVolume() (time.Duration, error)
 }
 
 type App struct {
@@ -42,26 +43,35 @@ func (a *App) Start() {
 }
 
 func (a *App) execute() {
-	defer a.afterExecute()
 	a.l.Debug("executing app...")
 
-	err := a.f.FillOrderBook()
+	orderBookHoldback, err := a.f.FillOrderBook()
 	if err != nil {
 		a.l.WithError(err).Errorf("error encountered while filling order book")
+
+		a.afterExecute(time.Duration(restartInterval) * time.Second)
 
 		return
 	}
 
-	err = a.v.MakeVolume()
+	volumeHoldBack, err := a.v.MakeVolume()
 	if err != nil {
 		a.l.WithError(err).Errorf("error encountered while making volume")
+		a.afterExecute(time.Duration(restartInterval) * time.Second)
+
+		return
 	}
+
+	a.l.Infof("holdbacks: order book: %s, volume: %s", orderBookHoldback, volumeHoldBack)
+
+	//we restart the app after the holdback is finished
+	a.afterExecute(min(orderBookHoldback, volumeHoldBack))
 }
 
-func (a *App) afterExecute() {
+func (a *App) afterExecute(restartDelay time.Duration) {
 	a.l.Info("app finished")
-	time.AfterFunc(time.Second*restartInterval, func() {
+	time.AfterFunc(restartDelay, func() {
 		a.execute()
 	})
-	a.l.Infof("restarting in %d seconds", restartInterval)
+	a.l.Infof("restarting in %d seconds", restartDelay/time.Second)
 }

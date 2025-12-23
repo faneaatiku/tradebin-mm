@@ -15,7 +15,8 @@ import (
 )
 
 const (
-	cancelOrdersDelta = 5
+	cancelOrdersDelta               = 5
+	defaultHoldback   time.Duration = 30 * time.Second
 )
 
 type balanceProvider interface {
@@ -116,23 +117,35 @@ func NewOrdersFiller(
 	}, nil
 }
 
-func (v *Orders) FillOrderBook() error {
+func (v *Orders) FillOrderBook() (time.Duration, error) {
 	strategy := v.ordersConfig.GetLiquidityStrategy()
 
+	balances, err := v.balanceProvider.GetMarketBalance(v.addressProvider.GetAddress().String(), v.marketConfig)
+	if err != nil {
+		return defaultHoldback, fmt.Errorf("failed to get balances: %v", err)
+	}
+
+	holdback := time.Duration(v.ordersConfig.GetHoldBackSeconds()) * time.Second
+	lastTrade, err := v.getDurationSinceLastTradeExceptSelfMadeVolume(balances.MarketId)
+	if err != nil {
+		return defaultHoldback, fmt.Errorf("failed to get last trade duration: %v", err)
+	}
+
+	// Check hold-back timer
+	if lastTrade != nil && *lastTrade < holdback {
+		v.l.Infof("preliminary holdback. will wait %d seconds to try again", (holdback-*lastTrade)/time.Second)
+		return holdback - *lastTrade, nil
+	}
+
 	if strategy == "clmm" {
-		return v.fillOrderBookCLMM()
+		return defaultHoldback, v.fillOrderBookCLMM(balances)
 	}
 
 	// Default: use fixed grid strategy
-	return v.fillOrderBookFixed()
+	return defaultHoldback, v.fillOrderBookFixed(balances)
 }
 
-func (v *Orders) fillOrderBookFixed() error {
-	balances, err := v.balanceProvider.GetMarketBalance(v.addressProvider.GetAddress().String(), v.marketConfig)
-	if err != nil {
-		return fmt.Errorf("failed to get balances: %v", err)
-	}
-
+func (v *Orders) fillOrderBookFixed(balances *dto.MarketBalance) error {
 	requiredOrders := v.ordersConfig.GetBuyNo() + v.ordersConfig.GetSellNo()
 	myBuys, mySells, err := v.ordersProvider.GetAddressActiveOrders(balances.MarketId, v.addressProvider.GetAddress().String(), requiredOrders*2)
 	if err != nil {
@@ -185,14 +198,8 @@ func (v *Orders) fillOrderBookFixed() error {
 	return nil
 }
 
-func (v *Orders) fillOrderBookCLMM() error {
+func (v *Orders) fillOrderBookCLMM(balances *dto.MarketBalance) error {
 	l := v.l.WithField("func", "fillOrderBookCLMM")
-
-	// Get balances
-	balances, err := v.balanceProvider.GetMarketBalance(v.addressProvider.GetAddress().String(), v.marketConfig)
-	if err != nil {
-		return fmt.Errorf("failed to get balances: %v", err)
-	}
 
 	// Get my existing orders
 	requiredOrders := v.ordersConfig.GetBuyNo() + v.ordersConfig.GetSellNo()
@@ -611,6 +618,26 @@ func (v *Orders) shouldFillOrderBook(marketId string) bool {
 	}
 
 	return time.Now().Unix()-history.ExecutedAt > int64(v.ordersConfig.GetHoldBackSeconds())
+}
+
+func (v *Orders) getDurationSinceLastTradeExceptSelfMadeVolume(marketId string) (*time.Duration, error) {
+	history, err := v.ordersProvider.GetLastMarketOrder(marketId)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get last order for market: %w", err)
+	}
+
+	if history == nil {
+		return nil, nil
+	}
+
+	if history.Maker == v.addressProvider.GetAddress().String() && history.Taker == v.addressProvider.GetAddress().String() {
+		return nil, nil
+	}
+
+	diff := time.Now().Unix() - history.ExecutedAt
+	duration := time.Duration(diff) * time.Second
+
+	return &duration, nil
 }
 
 // CLMM helper functions

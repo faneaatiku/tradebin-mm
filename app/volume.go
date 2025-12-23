@@ -126,7 +126,7 @@ func NewVolumeMaker(
 	}, nil
 }
 
-func (v *Volume) MakeVolume() error {
+func (v *Volume) MakeVolume() (time.Duration, error) {
 	l := v.l.WithField("func", "MakeVolume")
 	if v.cfg.GetMax() == 0 {
 		l.Info("volume maker is stopped due to volume max setting set to 0 or below")
@@ -139,14 +139,14 @@ func (v *Volume) MakeVolume() error {
 	balances, err := v.balanceProvider.GetMarketBalance(v.addressProvider.GetAddress().String(), v.marketConfig)
 	if err != nil {
 
-		return fmt.Errorf("failed to get balances: %w", err)
+		return defaultHoldback, fmt.Errorf("failed to get balances: %w", err)
 	}
 
 	l.WithField("balances", balances).Debugf("balances fetched")
 
 	buys, sells, err := v.ordersProvider.GetActiveOrders(balances)
 	if err != nil {
-		return fmt.Errorf("failed to get active orders: %w", err)
+		return defaultHoldback, fmt.Errorf("failed to get active orders: %w", err)
 	}
 
 	// Liquidity pool integration: query LP and rebalance if needed
@@ -185,7 +185,7 @@ func (v *Volume) MakeVolume() error {
 							v.marketConfig,
 						)
 						if err != nil {
-							return fmt.Errorf("failed to refresh balances: %w", err)
+							return defaultHoldback, fmt.Errorf("failed to refresh balances: %w", err)
 						}
 					}
 				}
@@ -196,19 +196,20 @@ func (v *Volume) MakeVolume() error {
 	strategy, err := v.getStrategy(balances, buys, sells)
 	if err != nil {
 
-		return fmt.Errorf("failed to get strategy: %w", err)
+		return defaultHoldback, fmt.Errorf("failed to get strategy: %w", err)
 	}
 
 	allowedInterval := time.Now().Add(-time.Duration(v.cfg.GetTradeInterval()) * time.Second)
 	if strategy.LastRunAt().After(allowedInterval) {
-		l.Debug("it's not the time to make volume yet")
+		holdback := strategy.LastRunAt().Sub(allowedInterval)
+		l.Debugf("it's not the time to make volume yet. Will try again in %d seconds", holdback/time.Second)
 
-		return nil
+		return holdback, nil
 	}
 
 	history, err := v.ordersProvider.GetLastMarketOrder(balances.MarketId)
 	if err != nil {
-		return fmt.Errorf("failed to get last market order: %w", err)
+		return defaultHoldback, fmt.Errorf("failed to get last market order: %w", err)
 	}
 
 	if history != nil {
@@ -216,7 +217,7 @@ func (v *Volume) MakeVolume() error {
 		if histDate.After(allowedInterval) {
 			l.WithField("hist_date", histDate).Info("market has been active in the last minutes. Will NOT create volume")
 
-			return nil
+			return defaultHoldback, nil
 		}
 
 		//if a foreign address is the last trader hold back for X duration taken from config
@@ -225,7 +226,9 @@ func (v *Volume) MakeVolume() error {
 			if holdBackUntil.After(time.Now()) {
 				l.WithField("hist_date", histDate).Infof("found foreign order holding back until: %s", holdBackUntil)
 
-				return nil
+				duration := holdBackUntil.Sub(time.Now())
+
+				return duration, nil
 			}
 		}
 	}
@@ -243,14 +246,14 @@ func (v *Volume) MakeVolume() error {
 				"tolerance":  v.cfg.GetLpTolerance(),
 			}).Info("order book price outside LP tolerance, creating strategic order to push toward LP")
 
-			return v.createStrategicOrderToLP(midPrice, *spotPrice, balances, buys, sells)
+			return defaultHoldback, v.createStrategicOrderToLP(midPrice, *spotPrice, balances, buys, sells)
 		}
 	}
 
 	// Order book price is within tolerance or LP not enabled - use normal volume strategy
 	order, orderAmount, msgs := v.makeOrder(strategy, buys, sells, balances)
 	if order == nil || !orderAmount.IsPositive() || len(msgs) == 0 {
-		return nil
+		return 0, nil
 	}
 
 	l.WithField("order_msg", order).Info("order message created")
@@ -260,7 +263,7 @@ func (v *Volume) MakeVolume() error {
 		//destroy the strategy maybe it's out of balance and it should change
 		v.strategy = nil
 
-		return fmt.Errorf("failed to submit order: %w", err)
+		return defaultHoldback, fmt.Errorf("failed to submit order: %w", err)
 	}
 	l.WithField("order_msg", order).Debug("order message submitted")
 
@@ -269,7 +272,7 @@ func (v *Volume) MakeVolume() error {
 
 	l.WithField("strategy", strategy).Info("finished making volume")
 
-	return nil
+	return defaultHoldback, nil
 }
 
 func (v *Volume) ackOrder(orderAmount math.Int) {
