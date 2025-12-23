@@ -216,7 +216,7 @@ func (v *Volume) MakeVolume() (time.Duration, error) {
 		histDate := time.Unix(history.ExecutedAt, 0)
 		if histDate.After(allowedInterval) {
 			holdback := histDate.Sub(allowedInterval)
-			l.WithField("hist_date", histDate).Info("history order found. will hold back for %s", holdback.String())
+			l.WithField("hist_date", histDate).Infof("history order found. will hold back for %s", holdback.String())
 
 			return holdback, nil
 		}
