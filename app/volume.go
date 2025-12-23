@@ -215,9 +215,10 @@ func (v *Volume) MakeVolume() (time.Duration, error) {
 	if history != nil {
 		histDate := time.Unix(history.ExecutedAt, 0)
 		if histDate.After(allowedInterval) {
-			l.WithField("hist_date", histDate).Info("market has been active in the last minutes. Will NOT create volume")
+			holdback := histDate.Sub(allowedInterval)
+			l.WithField("hist_date", histDate).Info("history order found. will hold back for %s", holdback.String())
 
-			return defaultHoldback, nil
+			return holdback, nil
 		}
 
 		//if a foreign address is the last trader hold back for X duration taken from config
