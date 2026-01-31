@@ -55,38 +55,64 @@ func NewVolumeHandler() (*VolumeHandler, error) {
 }
 
 func (h *VolumeHandler) MakeVolume(ctx VolumeContext) error {
+	l := h.logger.WithField("func", "MakeVolume")
+	l.Info("starting volume making process")
+
 	balances := ctx.GetMarketBalance()
+	l.WithFields(logrus.Fields{
+		"base_balance":  balances.GetBase().String(),
+		"quote_balance": balances.GetQuote().String(),
+	}).Debug("retrieved market balances")
+
 	if !balances.HasPositiveBalance() {
+		l.Warn("no positive balance available to make volume")
 		return fmt.Errorf("no balance to make volume")
 	}
 
 	toFill, err := h.decideOrderToFill(ctx)
 	if err != nil {
+		l.WithError(err).Error("failed to decide which order to fill")
 		return err
 	}
 
 	if toFill == nil {
+		l.Warn("no suitable order found to fill")
 		return fmt.Errorf("can not make volume: no order to fill")
 	}
 
+	l.WithFields(logrus.Fields{
+		"order_type":   toFill.OrderType.String(),
+		"order_price":  toFill.AggregatedOrder.Price,
+		"order_amount": toFill.AggregatedOrder.Amount,
+	}).Debug("selected order to fill")
+
 	amount := h.getRandomAmount(h.cfg.GetMinAmount(), h.cfg.GetMaxAmount())
+	l.WithField("random_amount", amount.String()).Debug("generated random amount")
+
 	if amount.GT(toFill.GetAmount()) {
 		amount = toFill.GetAmount()
+		l.WithField("adjusted_amount", amount.String()).Debug("adjusted amount to match available order amount")
 	}
 
 	var msgs []sdktypes.Msg
-	if h.shouldDoExtraVolume() && h.canDoExtraVolume(toFill) {
-		//random amount
+	shouldExtraVolume := h.shouldDoExtraVolume()
+	canExtraVolume := h.canDoExtraVolume(toFill)
+
+	l.WithFields(logrus.Fields{
+		"should_do_extra": shouldExtraVolume,
+		"can_do_extra":    canExtraVolume,
+		"execution_count": h.executionsCounter,
+	}).Debug("evaluated extra volume conditions")
+
+	if shouldExtraVolume && canExtraVolume {
 		extraAmount := h.getRandomAmount(h.cfg.GetMinExtraAmount(), h.cfg.GetMaxExtraAmount())
-		//add it to the total we have to trade
-		//this amount will be used for the taker order
+		l.WithField("extra_amount", extraAmount.String()).Debug("doing extra volume - generated extra amount")
+
 		amount = amount.Add(extraAmount)
 		if amount.GT(toFill.GetAmount()) {
-			//we have to do extra volume, but the existing order at this price doesn't have enough amount
-			//we need to create a new order before filling the existing order (and the newly one created)
-
-			//need to create a new order (maker order) which we will fill with the taker order
 			amountForNewOrder := amount.Sub(toFill.GetAmount())
+			l.WithField("maker_order_amount", amountForNewOrder.String()).Debug("creating additional maker order for extra volume")
+
 			makerOrder := h.msgFactory.NewCreateOrderMsg(amountForNewOrder.String(), toFill.OrderType.String(), toFill.AggregatedOrder.Price)
 			msgs = append(msgs, &makerOrder)
 		}
@@ -95,14 +121,27 @@ func (h *VolumeHandler) MakeVolume(ctx VolumeContext) error {
 	takerOrder := h.msgFactory.NewCreateOrderMsg(amount.String(), toFill.OrderType.GetOpposite().String(), toFill.AggregatedOrder.Price)
 	msgs = append(msgs, &takerOrder)
 
+	l.WithFields(logrus.Fields{
+		"total_messages": len(msgs),
+		"final_amount":   amount.String(),
+		"price":          toFill.AggregatedOrder.Price,
+		"taker_type":     toFill.OrderType.GetOpposite().String(),
+	}).Debug("prepared transaction messages")
+
 	h.IncrementExecutionsCounter()
 
 	txID, err := h.tx.SubmitTxMsgs(msgs)
 	if err != nil {
+		l.WithError(err).Error("failed to submit volume making transaction")
 		return fmt.Errorf("failed to submit volume making tx: %w", err)
 	}
 
-	h.logger.WithField("tx_id", txID).Info("volume making tx submitted successfully")
+	l.WithFields(logrus.Fields{
+		"tx_id":        txID,
+		"msg_count":    len(msgs),
+		"trade_amount": amount.String(),
+		"trade_price":  toFill.AggregatedOrder.Price,
+	}).Info("volume making transaction submitted successfully")
 
 	return nil
 }
@@ -130,8 +169,17 @@ func (h *VolumeHandler) shouldDoExtraVolume() bool {
 }
 
 func (h *VolumeHandler) decideOrderToFill(ctx VolumeContext) (*dto.OrderBookEntry, error) {
+	l := h.logger.WithField("func", "decideOrderToFill")
+	l.Debug("starting order selection process")
+
 	orderBook := ctx.GetOrderBook()
+	l.WithFields(logrus.Fields{
+		"buy_orders_count":  len(orderBook.Buys),
+		"sell_orders_count": len(orderBook.Sells),
+	}).Debug("retrieved order book")
+
 	if len(orderBook.Buys) == 0 && len(orderBook.Sells) == 0 {
+		l.Warn("order book is empty")
 		return nil, fmt.Errorf("no orders to make volume")
 	}
 
@@ -140,65 +188,98 @@ func (h *VolumeHandler) decideOrderToFill(ctx VolumeContext) (*dto.OrderBookEntr
 	if len(orderBook.Buys) > 0 {
 		firstBuy = &orderBook.Buys[0]
 		hasFirstBuy = true
+		l.WithField("first_buy_price", firstBuy.Price.String()).Debug("found first buy order")
 	}
 
 	if len(orderBook.Sells) > 0 {
 		firstSell = &orderBook.Sells[0]
 		hasFirstSell = true
+		l.WithField("first_sell_price", firstSell.Price.String()).Debug("found first sell order")
 	}
 
 	canBuy, canSell = h.canBuyOrSell(firstBuy, firstSell)
+	l.WithFields(logrus.Fields{
+		"can_buy_initial":  canBuy,
+		"can_sell_initial": canSell,
+	}).Debug("evaluated initial buy/sell capabilities")
+
 	if (canBuy && !hasFirstSell) || (canSell && !hasFirstBuy) {
-		//can not buy or sell if we don't have an order to fill.
-		//this should never happen, but if it does, we want to make sure we see it
+		l.Error("inconsistent state: can buy/sell but order missing")
 		panic("something went wrong with canBuyOrSell logic")
 	}
 
 	ammPrice := ctx.GetAmmSpotPrice(ctx.GetBaseDenom())
 	if ammPrice != nil {
+		l.WithField("amm_price", ammPrice.String()).Debug("AMM spot price available")
+
 		low, high := h.getPriceTolerance(*ammPrice)
-		//if we can buy but the first sell is too high, we can't buy
+		l.WithFields(logrus.Fields{
+			"price_tolerance_low":  low.String(),
+			"price_tolerance_high": high.String(),
+		}).Debug("calculated price tolerance range")
+
 		if canBuy && firstSell.Price.GT(high) {
 			canBuy = false
+			l.WithField("first_sell_price", firstSell.Price.String()).Debug("first sell price too high, disabling buy")
 		}
 
-		//if we can sell but the first buy is too low, we can't sell
 		if canSell && firstBuy.Price.LT(low) {
 			canSell = false
+			l.WithField("first_buy_price", firstBuy.Price.String()).Debug("first buy price too low, disabling sell")
 		}
 
-		//if we can do both, decide to only one of them, the one closer to the price
 		if canBuy && canSell {
 			buyOrderDiff := firstBuy.Price.Sub(*ammPrice).Abs()
 			sellOrderDiff := firstSell.Price.Sub(*ammPrice).Abs()
-			//we want the price movement to be as low as possible
+
+			l.WithFields(logrus.Fields{
+				"buy_order_diff":  buyOrderDiff.String(),
+				"sell_order_diff": sellOrderDiff.String(),
+			}).Debug("both buy and sell possible, choosing closer to AMM price")
+
 			if buyOrderDiff.LT(sellOrderDiff) {
-				//the buy order is closer to the price, so we can only buy
 				canSell = false
+				l.Debug("buy order closer to AMM price, choosing buy")
 			} else {
-				//the sell order is closer to the price, so we can only sell
 				canBuy = false
+				l.Debug("sell order closer to AMM price, choosing sell")
 			}
 		}
+	} else {
+		l.Debug("AMM spot price not available, skipping price tolerance check")
 	}
 
-	// we couldn't make a decision
 	if !canBuy && !canSell {
+		l.Warn("cannot buy or sell after all checks")
 		return nil, fmt.Errorf("can not buy or sell to make volume")
 	}
 
-	//if we can do both, we have to decide to only one of them
 	if canBuy && canSell {
-		//if we own the entire amount of buy and sell, we decide randomly
 		canBuy = rand.Intn(2) == 0
 		canSell = !canBuy
+		l.WithFields(logrus.Fields{
+			"can_buy":  canBuy,
+			"can_sell": canSell,
+		}).Debug("both options viable, randomly selected one")
 	}
 
 	if canBuy {
+		l.WithFields(logrus.Fields{
+			"decision":     "buy",
+			"fill_order":   "sell",
+			"order_price":  firstSell.Price.String(),
+			"order_amount": firstSell.AggregatedOrder.Amount,
+		}).Info("decided to buy (fill sell order)")
 		return firstSell, nil
 	}
 
 	if canSell {
+		l.WithFields(logrus.Fields{
+			"decision":     "sell",
+			"fill_order":   "buy",
+			"order_price":  firstBuy.Price.String(),
+			"order_amount": firstBuy.AggregatedOrder.Amount,
+		}).Info("decided to sell (fill buy order)")
 		return firstBuy, nil
 	}
 
@@ -206,11 +287,17 @@ func (h *VolumeHandler) decideOrderToFill(ctx VolumeContext) (*dto.OrderBookEntr
 }
 
 func (h *VolumeHandler) canBuyOrSell(firstBuy, firstSell *dto.OrderBookEntry) (canBuy, canSell bool) {
+	l := h.logger.WithField("func", "canBuyOrSell")
+
 	var allSellOurs, allBuyOurs bool
 	if firstSell != nil {
 		if len(firstSell.Orders) > 0 {
 			allSellOurs = firstSell.IsComplete()
 			canBuy = true
+			l.WithFields(logrus.Fields{
+				"sell_orders_count": len(firstSell.Orders),
+				"all_sell_ours":     allSellOurs,
+			}).Debug("evaluated sell orders ownership")
 		}
 	}
 
@@ -218,28 +305,56 @@ func (h *VolumeHandler) canBuyOrSell(firstBuy, firstSell *dto.OrderBookEntry) (c
 		if len(firstBuy.Orders) > 0 {
 			allBuyOurs = firstBuy.IsComplete()
 			canSell = true
+			l.WithFields(logrus.Fields{
+				"buy_orders_count": len(firstBuy.Orders),
+				"all_buy_ours":     allBuyOurs,
+			}).Debug("evaluated buy orders ownership")
 		}
 	}
 
 	if allBuyOurs != allSellOurs {
 		canBuy = allSellOurs
 		canSell = allBuyOurs
+		l.WithFields(logrus.Fields{
+			"can_buy":  canBuy,
+			"can_sell": canSell,
+			"reason":   "ownership_asymmetry",
+		}).Debug("adjusted buy/sell capabilities based on ownership")
 	}
+
+	l.WithFields(logrus.Fields{
+		"final_can_buy":  canBuy,
+		"final_can_sell": canSell,
+	}).Debug("determined buy/sell capabilities")
 
 	return canBuy, canSell
 }
 
 func (h *VolumeHandler) getPriceTolerance(currentPrice math.LegacyDec) (low, high math.LegacyDec) {
+	l := h.logger.WithField("func", "getPriceTolerance")
+
 	percent := h.cfg.GetPriceTolerancePercentage()
 	tolerance := currentPrice.Mul(percent)
+
 	low = currentPrice.Sub(tolerance)
 	if !low.IsPositive() {
 		low = math.LegacyZeroDec()
+		l.Debug("adjusted low tolerance to zero (was negative)")
 	}
+
 	high = currentPrice.Add(tolerance)
 	if !high.IsPositive() {
 		high = math.LegacyZeroDec()
+		l.Debug("adjusted high tolerance to zero (was negative)")
 	}
+
+	l.WithFields(logrus.Fields{
+		"current_price": currentPrice.String(),
+		"tolerance_pct": percent.String(),
+		"tolerance_abs": tolerance.String(),
+		"low_bound":     low.String(),
+		"high_bound":    high.String(),
+	}).Debug("calculated price tolerance bounds")
 
 	return low, high
 }
