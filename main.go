@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 	"tradebin-mm/app"
 	"tradebin-mm/app/cache"
 	"tradebin-mm/app/client"
@@ -23,6 +24,7 @@ const (
 	defaultAction = "mm"
 	actionCancel  = "cancel"
 	withdrawAll   = "withdraw-all"
+	lpVolume      = "lp-volume"
 )
 
 func main() {
@@ -40,19 +42,22 @@ func main() {
 		log.Fatalf("could not load config: %v", err)
 	}
 
-	err = cfg.Validate()
-	if err != nil {
-		log.Fatalf("config validation failed: %v", err)
+	action := defaultAction
+	if len(os.Args) > 2 {
+		action = os.Args[2]
+	}
+
+	// lp-volume only needs wallet, client, transaction, and liquidity_pool config
+	if action != lpVolume {
+		err = cfg.Validate()
+		if err != nil {
+			log.Fatalf("config validation failed: %v", err)
+		}
 	}
 
 	l, err := NewLogger(cfg.Logging)
 	if err != nil {
 		log.Fatalf("could not create logger: %v", err)
-	}
-
-	action := defaultAction
-	if len(os.Args) > 2 {
-		action = os.Args[2]
 	}
 
 	switch action {
@@ -62,6 +67,8 @@ func main() {
 		cancelOrders(cfg, l)
 	case withdrawAll:
 		withdrawAllBalances(cfg, l)
+	case lpVolume:
+		startLPVolumeMaking(cfg, l)
 	}
 }
 
@@ -160,7 +167,6 @@ func startMarketMaking(cfg *config.Config, l logrus.FieldLogger) {
 	}
 
 	fmt.Printf("Address: %s\n", w.Address)
-
 	grpc, err := getGrpcClient(cfg.Client)
 	if err != nil {
 		log.Fatalf("could not create grpc client: %v", err)
@@ -226,6 +232,70 @@ func startMarketMaking(cfg *config.Config, l logrus.FieldLogger) {
 	go a.Start()
 	<-done
 
+	fmt.Print("program closed")
+	os.Exit(0)
+}
+
+func startLPVolumeMaking(cfg *config.Config, l logrus.FieldLogger) {
+	if err := cfg.Wallet.Validate(); err != nil {
+		log.Fatalf("wallet config validation failed: %v", err)
+	}
+	if err := cfg.Client.Validate(); err != nil {
+		log.Fatalf("client config validation failed: %v", err)
+	}
+	if err := cfg.Transaction.Validate(); err != nil {
+		log.Fatalf("transaction config validation failed: %v", err)
+	}
+	if err := cfg.LiquidityPool.Validate(); err != nil {
+		log.Fatalf("liquidity pool config validation failed: %v", err)
+	}
+
+	w, err := wallet.NewWallet(cfg.Wallet.Mnemonic, cfg.Transaction.GetAddressPrefix())
+	if err != nil {
+		log.Fatalf("could not create wallet: %v", err)
+	}
+
+	fmt.Printf("Address: %s\n", w.Address)
+
+	grpc, err := getGrpcClient(cfg.Client)
+	if err != nil {
+		log.Fatalf("could not create grpc client: %v", err)
+	}
+
+	balances, err := data_provider.NewBalanceDataProvider(l, grpc)
+	if err != nil {
+		log.Fatalf("could not create balance data provider: %v", err)
+	}
+
+	broadcaster, err := service.NewBroadcaster(l, &cfg.Transaction, w, grpc)
+	if err != nil {
+		log.Fatalf("could not create broadcaster: %v", err)
+	}
+
+	lpDataProvider, err := data_provider.NewLiquidityPoolProvider(l, grpc)
+	if err != nil {
+		log.Fatalf("could not create liquidity pool data provider: %v", err)
+	}
+
+	lpVolumeMaker, err := app.NewLPVolumeMaker(l, lpDataProvider, balances, w, broadcaster, cfg.LiquidityPool.Id, cfg.LiquidityPool.Slippage)
+	if err != nil {
+		log.Fatalf("could not create lp volume maker: %v", err)
+	}
+
+	var done = make(chan bool)
+	addSigtermHandler(done)
+
+	go func() {
+		for {
+			err := lpVolumeMaker.MakeVolume()
+			if err != nil {
+				l.WithError(err).Error("lp volume maker error")
+			}
+			time.Sleep(time.Duration(cfg.LiquidityPool.Interval) * time.Second)
+		}
+	}()
+
+	<-done
 	fmt.Print("program closed")
 	os.Exit(0)
 }

@@ -133,14 +133,37 @@ type Logging struct {
 	Level string `yaml:"level"`
 }
 
+type LiquidityPool struct {
+	Id       string  `yaml:"id"`
+	Slippage float64 `yaml:"slippage"`
+	Interval int     `yaml:"interval"`
+}
+
+func (lp *LiquidityPool) Validate() error {
+	if lp.Id == "" {
+		return NewConfigError("liquidity_pool id is required")
+	}
+
+	if lp.Slippage <= 0 || lp.Slippage >= 1 {
+		return NewConfigError("liquidity_pool slippage must be between 0 and 1 (exclusive)")
+	}
+
+	if lp.Interval <= 0 {
+		return NewConfigError("liquidity_pool interval must be greater than 0")
+	}
+
+	return nil
+}
+
 type Config struct {
-	Orders      Orders      `yaml:"orders"`
-	Market      Market      `yaml:"market"`
-	Volume      Volume      `yaml:"volume"`
-	Wallet      Wallet      `yaml:"wallet"`
-	Client      Client      `yaml:"client"`
-	Logging     Logging     `yaml:"logging"`
-	Transaction Transaction `yaml:"transaction"`
+	Orders        Orders        `yaml:"orders"`
+	Market        Market        `yaml:"market"`
+	Volume        Volume        `yaml:"volume"`
+	Wallet        Wallet        `yaml:"wallet"`
+	Client        Client        `yaml:"client"`
+	Logging       Logging       `yaml:"logging"`
+	Transaction   Transaction   `yaml:"transaction"`
+	LiquidityPool LiquidityPool `yaml:"liquidity_pool"`
 }
 
 func (c *Config) Validate() error {

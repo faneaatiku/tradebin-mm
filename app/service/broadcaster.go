@@ -220,13 +220,13 @@ func (o *Broadcaster) Broadcast(msgs []sdk.Msg, mode sdkTx.BroadcastMode) error 
 	}
 	o.l.Debugf("simulated tx: %v", simulate.GasInfo)
 
-	fee, err := getFee(simulate.GasInfo.GasUsed, o.tx.GetGasPrices())
+	gasLimit := float64(simulate.GasInfo.GasUsed) * o.tx.GetGasAdjustment()
+	fee, err := getFee(uint64(gasLimit), o.tx.GetGasPrices())
 	if err != nil {
 		return err
 	}
 	o.l.WithField("fee", fee).Debug("calculated fee")
 
-	gasLimit := float64(simulate.GasInfo.GasUsed) * o.tx.GetGasAdjustment()
 	txBuilder.SetGasLimit(uint64(gasLimit))
 	txBuilder.SetFeeAmount(fee)
 

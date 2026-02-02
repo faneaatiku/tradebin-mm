@@ -31,4 +31,8 @@ transaction:
     gas_prices: "0.1ubze" # the gas prices to use for transactions
     chain_id: "beezee-1"
     address_prefix: "bze"
+liquidity_pool:
+    id: "" # the liquidity pool id
+    slippage: 0.01 # the slippage tolerance for swaps (0 to 1, e.g. 0.01 = 1%)
+    interval: 30 # the number of seconds between swaps
     
